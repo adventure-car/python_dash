@@ -41,8 +41,8 @@ from pathlib import Path
 # --------------------------------------------------------------------------
 # CONFIG - edit these to point at your repository
 # --------------------------------------------------------------------------
-GITHUB_OWNER = "YOUR_GITHUB_USERNAME"
-GITHUB_REPO = "python-dash"
+GITHUB_OWNER = "adventure-car"
+GITHUB_REPO = "python_dash"
 GITHUB_BRANCH = "main"
 GAME_FILENAME = "python_dash.py"
 
