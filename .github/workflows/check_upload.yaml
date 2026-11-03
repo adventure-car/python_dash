@@ -1,0 +1,67 @@
+# Runs whenever someone asks to add or change a level or a song (a pull request).
+# It checks the files and asks the admins to approve them.
+name: Check uploaded levels
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths: ["levels/**", "music/**"]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # The checker always comes from the main branch - never from the upload itself,
+      # so nobody can sneak in a changed checker.
+      - name: Get the checker (from main)
+        uses: actions/checkout@v4
+        with:
+          path: base
+
+      # The uploaded files are only ever READ as data, never run.
+      - name: Get the uploaded files
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: upload
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pygame-ce (for the "is it beatable?" check)
+        run: pip install pygame-ce
+
+      - name: List the uploaded files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh api --paginate
+          repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files
+          --jq '.[] | select(.status != "removed") | .filename' > changed.txt
+
+      - name: Check them
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+          UPLOADER: ${{ github.event.pull_request.user.login }}
+        run: python base/.github/scripts/check_upload.py changed.txt upload base > report.md
+
+      - name: Ask the admins to approve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh label create "needs approval" --repo "$REPO" --color FBCA04 \
+            --description "Waiting for an admin to approve" 2>/dev/null || true
+          gh pr edit "$PR" --repo "$REPO" --add-label "needs approval"
+          gh pr comment "$PR" --repo "$REPO" --body-file report.md
