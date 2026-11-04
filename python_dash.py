@@ -29,6 +29,15 @@ Level select has four tabs (LEFT/RIGHT or click):
                 - drag a .json onto the window to import it, or press O to open the folder
                 - shown as "[Level Name] by [Author]" (the author's account name)
   All Levels    everything above
+  Ranks         the official hardest-levels list (the Top 1 earns the Crown).  It is read
+                from hardest_levels.json in the repo, so admins can re-rank without a new
+                release; offline it falls back to the ranks built into this file.
+
+Uploading your levels
+---------------------
+  On the BUILD LEVELS (Your Levels) screen, press U to upload the selected level.  It is
+  sent into the shared online folder (PythonDashSubmissions/) as a request - an admin reviews
+  it from the MAIN LEVELS screen and adds the good ones.  Needs a shared folder and sign-in.
 
 Requirements:  pip install pygame-ce     (plain pygame works too if it installs)
 Run:           python python_dash.py
@@ -215,6 +224,8 @@ SHARED_DIR = (os.environ.get("PYTHON_DASH_SHARED")          # (for testing)
 MAIN_DIR = (os.path.join(SHARED_DIR, "PythonDashMainLevels") if SHARED_DIR
             else os.path.join(DATA_DIR, "main_levels"))     # levels promoted to main levels
 MAIN_META = os.path.join(MAIN_DIR, "_main_levels.json")   # names, difficulties, hidden
+SUBMIT_DIR = (os.path.join(SHARED_DIR, "PythonDashSubmissions") if SHARED_DIR
+              else None)                                  # in-game level upload requests
 ADMIN_ACCOUNTS = {"augmentedmagic"}                       # who can manage main levels
 MAIN_DIFFICULTIES = ["TEST", "EASY", "NORMAL", "HARD", "INSANE", "DEMON"]
 DIFF_ORDER = ["TEST", "EASY", "NORMAL", "HARD", "INSANE", "DEMON"]
@@ -2168,9 +2179,51 @@ LEVELS = [
 
 
 
-for _d in LEVELS:                        # ranked levels show their rank: "#3  Neon Gauntlet"
-    if _d.name in TOP_DEMONS:
-        _d.title = "#%d  %s" % (TOP_DEMONS.index(_d.name) + 1, _d.name)
+def apply_rank_titles():
+    """Show each built-in level's rank in its title ("#3  Neon Gauntlet"), or just its
+    plain name if it is not ranked.  Re-run whenever the ranks change."""
+    for _d in LEVELS:                    # ranked levels show their rank: "#3  Neon Gauntlet"
+        _d.title = ("#%d  %s" % (TOP_DEMONS.index(_d.name) + 1, _d.name)
+                    if _d.name in TOP_DEMONS else _d.name)
+
+
+def set_ranks(entries):
+    """Replace the official ranks (hardest first) from the GitHub hardest-levels list.
+
+    *entries* is the parsed manifest - a list of level dicts, or a {"ranks": [...]}
+    wrapper.  Returns True if a valid, non-empty list was applied; otherwise the
+    built-in ranks are left untouched and it returns False (so being offline, or a
+    broken file, always falls back to the ranks shipped with the game).
+    """
+    if isinstance(entries, dict):
+        entries = entries.get("ranks")
+    if not isinstance(entries, list):
+        return False
+    clean = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        name = str(e.get("name", "")).strip()
+        if not name:
+            continue
+        vic = e.get("victors")
+        clean.append({
+            "name": name,
+            "maker": str(e.get("maker", "")).strip() or "unknown",
+            "verifier": str(e.get("verifier", "")).strip() or "unknown",
+            "victors": [str(v).strip() for v in vic if str(v).strip()]
+                       if isinstance(vic, list) else [],
+            "frame_perfects": str(e.get("frame_perfects", "")).strip() or "unknown",
+        })
+    if not clean:
+        return False
+    RANKED_LEVELS[:] = clean
+    TOP_DEMONS[:] = [r["name"] for r in RANKED_LEVELS]
+    apply_rank_titles()
+    return True
+
+
+apply_rank_titles()
 # --------------------------------------------------------------------------
 # Player
 # --------------------------------------------------------------------------
@@ -3115,12 +3168,54 @@ def load_save():
 _save_target = [SAVE_PATH]      # where progress is written (changes with the account)
 
 
+def merge_progress(base, incoming):
+    """Merge *incoming* progress into *base*, keeping the best of each.
+
+    Progress only ever grows: a level's best % is the larger of the two, coins and
+    unlocks are unioned.  If the two are equal, nothing changes.  Settings and the
+    current skin choice are "current state", not progress, so *incoming* wins there.
+    *base* is mutated in place and returned.
+    """
+    for k, v in incoming.items():
+        if k == "__settings__" or (k == "__skins__" and isinstance(v, dict)):
+            base[k] = v                                   # current state wins
+        elif k == "__unlocks__" and isinstance(v, dict):
+            u = dict(base.get("__unlocks__") or {})
+            for name, on in v.items():
+                u[name] = bool(u.get(name)) or bool(on)   # unlocked anywhere -> unlocked
+            base[k] = u
+        elif k.endswith("#coins") and isinstance(v, list):
+            have = {tuple(c) for c in base.get(k, []) if isinstance(c, (list, tuple))}
+            have |= {tuple(c) for c in v if isinstance(c, (list, tuple))}
+            base[k] = sorted(list(c) for c in have)
+        elif isinstance(v, (int, float)) and not k.startswith("__"):
+            if v > base.get(k, 0):                        # keep the higher best %
+                base[k] = v
+        else:
+            base.setdefault(k, v)
+    return base
+
+
 def write_save(data):
     try:
         path = _save_target[0]
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # A shared (cloud-synced) file may have a better run from another computer.
+        # Merge it in first so a save never replaces a higher best with a lower one,
+        # then mirror the merged result back into memory.
+        merged = data
+        try:
+            with open(path) as f:
+                disk = json.load(f)
+            if isinstance(disk, dict):
+                merged = merge_progress(disk, data)
+        except Exception:
+            merged = data
         with open(path, "w") as f:
-            json.dump(data, f)
+            json.dump(merged, f)
+        if merged is not data:
+            data.clear()
+            data.update(merged)
     except Exception:
         pass
 
@@ -3313,6 +3408,25 @@ def repo_list(path, exts):
         if n.lower().endswith(exts):
             names.add(n)
     return sorted(((n, raw_url(path, n)) for n in names), key=lambda t: t[0].lower())
+
+
+HARDEST_FILE = "hardest_levels.json"   # the curated hardest-levels list (admins edit it)
+
+
+def fetch_hardest(out):
+    """Download the curated hardest-levels list from the repo (read-only).  Fills *out*
+    with {"status": "ok", "ranks": [...]} or {"status": "error", ...}."""
+    try:
+        url = "https://raw.githubusercontent.com/%s/%s/%s" % (REPO, REPO_BRANCH, HARDEST_FILE)
+        data = json.loads(http_get(url).decode("utf-8"))
+        ranks = data.get("ranks") if isinstance(data, dict) else data
+        if not isinstance(ranks, list):
+            raise ValueError("hardest_levels.json has no ranks list")
+        out["ranks"] = ranks
+        out["status"] = "ok"
+    except Exception as e:
+        out["err"] = str(e)
+        out["status"] = "error"
 
 
 def fetch_online_levels(out):
@@ -5274,6 +5388,9 @@ class Game:
         self.tab_lists = [[] for _ in TAB_NAMES]
         self.online = {"status": "idle"}          # online levels (fetched in the background)
         self.online_songs = {"status": "idle"}    # online music
+        self.hardest = {"status": "idle"}          # curated hardest-levels list from GitHub
+        self.hardest_applied = False
+        self.start_hardest_fetch()                 # refresh the ranks in the background
         self.move_old_downloads()
         self.other = []
         self.empty_lines = []
@@ -5471,6 +5588,18 @@ class Game:
         items = [{"type": "admin_folder", "name": "+ OPEN MAIN LEVELS FOLDER",
                   "sub": "Drop level .json files in it (or drag them onto this window)",
                   "tag": "FOLDER", "col": (90, 230, 120), "modes": [], "best": None}]
+        headers = 1
+        if SUBMIT_DIR:
+            try:
+                waiting = len([f for f in os.listdir(SUBMIT_DIR) if f.lower().endswith(".json")])
+            except OSError:
+                waiting = 0
+            items.append({"type": "submit_folder",
+                          "name": "+ OPEN UPLOADS FOLDER (%d waiting)" % waiting,
+                          "sub": "Levels players uploaded from the game - review one, then drop "
+                                 "it into the main levels folder above to add it",
+                          "tag": "UPLOADS", "col": (120, 200, 255), "modes": [], "best": None})
+            headers += 1
         for d in self.builtin_levels(include_hidden=True):
             items.append({"type": "admin_builtin", "level": d, "name": d.title,
                           "sub": ("Built-in level  -  HIDDEN from the level list" if d.hidden
@@ -5491,7 +5620,7 @@ class Game:
                           "tag": diff if ready else "NEEDS SETUP",
                           "col": DIFF_COLOR[diff] if ready else (255, 160, 90),
                           "modes": data.mode_list(), "best": None})
-        self.admin_files = len(items) - 1
+        self.admin_files = len(items) - headers
         self.admin_scan = 0
         self.set_list("admin", items, min(sel, len(items) - 1))
 
@@ -6083,11 +6212,14 @@ class Game:
         mine = [custom_def(d) for d in self.custom]
         theirs = [custom_def(d, "OTHER") for d in self.other]
         built = self.builtin_levels()
-        by_name = {d.base_name: d for d in built}
-        ranked = [by_name[r["name"]] for r in RANKED_LEVELS if r["name"] in by_name]
         main = built + self.load_main_levels()          # all main levels, by difficulty
         main.sort(key=lambda d: DIFF_ORDER.index(d.difficulty) if d.difficulty in DIFF_ORDER
                   else len(DIFF_ORDER))
+        # The hardest-levels list names any level; match built-ins and main levels first.
+        by_name = {}
+        for d in main + mine + theirs:
+            by_name.setdefault(getattr(d, "base_name", d.name), d)
+        ranked = [by_name[r["name"]] for r in RANKED_LEVELS if r["name"] in by_name]
         self.tab_lists = [main, mine, theirs, main + mine + theirs, ranked, []]  # [] = Online
 
     def level_item(self, d):
@@ -6157,6 +6289,14 @@ class Game:
         threading.Thread(target=fetch_online_music, args=(self.online_songs,),
                          daemon=True).start()
 
+    def start_hardest_fetch(self, force=False):
+        if self.hardest["status"] == "loading" or (self.hardest["status"] == "ok"
+                                                    and not force):
+            return
+        self.hardest = {"status": "loading"}
+        self.hardest_applied = False
+        threading.Thread(target=fetch_hardest, args=(self.hardest,), daemon=True).start()
+
     def online_items(self):
         st = self.online["status"]
         if st != "ok":
@@ -6221,7 +6361,9 @@ class Game:
     def rank_item(self, d):
         """A level card for the Ranks tab: maker, verifier, victors and frame perfects."""
         base = getattr(d, "base_name", d.name)       # (the name before any rename)
-        info = next(r for r in RANKED_LEVELS if r["name"] == base)
+        info = next((r for r in RANKED_LEVELS if r["name"] == base),
+                    {"maker": "unknown", "verifier": "unknown", "victors": [],
+                     "frame_perfects": "unknown"})
         it = self.level_item(d)
         it["sub"] = "Made by %s     Verified by %s" % (info["maker"], info["verifier"])
         it["sub2"] = "Victors: %s     Frame perfects: %s" % (
@@ -6309,6 +6451,38 @@ class Game:
             msg += "  (sign in to put your name on it)"
         self.say(msg)
 
+    def upload_selected(self):
+        """Send a level from Your Levels to the shared folder as an upload request.
+
+        This drops the level (its song included) into the shared online folder so an
+        admin can review it and add it to the game - it is a request, not a direct add,
+        so no repository permissions are needed.  Only works when the game is in a
+        shared folder and you are signed in, so the upload carries your name.
+        """
+        if self.state != "mylevels" or self.my_page != "list" or not self.items:
+            return
+        it = self.items[self.sel]
+        if it.get("type") != "custom" or not it.get("path"):
+            return
+        if not SUBMIT_DIR:
+            self.say("Uploading needs the game to be run from a shared online folder")
+            return
+        if not self.account:
+            self.say("Sign in first so your upload is sent under your name")
+            return
+        try:
+            os.makedirs(SUBMIT_DIR, exist_ok=True)
+            data = it["data"]
+            data.author = self.account                   # your account name goes with it
+            j = data.to_json(embed_music=True)           # ...and so does its song
+            dest = unique_level_path(it["name"], SUBMIT_DIR)
+            with open(dest, "w") as f:
+                json.dump(j, f)
+        except OSError:
+            self.say("Couldn't upload the level")
+            return
+        self.say("Uploaded \"%s\" - an admin will review it before it's added" % data.name)
+
     def card_buttons(self, slot):
         r = self.card_rect(slot)
         return {"copy": pygame.Rect(r.right - 176, r.bottom - 34, 76, 24),
@@ -6372,6 +6546,9 @@ class Game:
         it = self.items[i]
         if it.get("type") == "admin_folder":
             self.open_folder(MAIN_DIR)
+            return
+        if it.get("type") == "submit_folder":
+            self.open_folder(SUBMIT_DIR)
             return
         if it.get("type") in ("admin_level", "admin_builtin"):
             self.open_main_setup(it)
@@ -6813,6 +6990,8 @@ class Game:
                     self.copy_selected()
                 elif self.state == "mylevels" and k == pygame.K_e:
                     self.export_selected()
+                elif self.state == "mylevels" and k == pygame.K_u:
+                    self.upload_selected()
                 elif n == 0:
                     pass
                 elif k in (pygame.K_UP, pygame.K_w):
@@ -6996,6 +7175,12 @@ class Game:
     # ---- update -------------------------------------------------------------------
     def update(self):
         self.menu_t += 1
+        if self.hardest["status"] == "ok" and not self.hardest_applied:
+            self.hardest_applied = True
+            if set_ranks(self.hardest.get("ranks", [])):
+                self.check_top1()           # the Top 1 demon may have changed
+                if self.state == "select" and self.tab == RANKS_TAB:
+                    self.go_select(self.sel, RANKS_TAB)
         if (self.state == "select" and self.tab == ONLINE_TAB
                 and self.items and self.items[0].get("type") == "online_msg"
                 and self.online["status"] in ("ok", "error")
@@ -7278,7 +7463,8 @@ class Game:
         if st == "mylevels":
             if self.my_page == "list":
                 self.draw_list("BUILD LEVELS", "create a new level or edit one of yours",
-                               "ENTER: edit   C: copy   E: export to Desktop   DELETE: remove   ESC: back")
+                               "ENTER: edit   C: copy   E: export   U: upload"
+                               "   DELETE: remove   ESC: back")
             else:
                 self.draw_list("COPY A LEVEL", "pick a built-in or imported level to use as a "
                                "template",
