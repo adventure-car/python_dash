@@ -1,6 +1,6 @@
 # Python Dash
-Requirements: 
- Python
- Pygame
- JSON
+Requirements: \n
+ Python \n
+ Pygame \n
+ JSON \n
  Urllib
