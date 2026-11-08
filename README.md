@@ -1,2 +1,6 @@
-# python_dash
-Video Game :)
+# Python Dash
+Requirements: 
+ Python
+ Pygame
+ JSON
+ Urllib
