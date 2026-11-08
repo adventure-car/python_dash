@@ -2,7 +2,9 @@
 Requirements:
 
  Python
+ 
  Pygame
+ 
  
  JSON
  
