@@ -2,9 +2,9 @@
   "_comment": "The official hardest-levels list, hardest first. The game reads this at startup (read-only) and shows it in the level select's Ranks tab; entry 0 is the Top 1 demon (beating it earns the Crown cube). Levels are matched to the game by \"name\". Admins: edit this file to add/reorder/remove ranked levels - see HARDEST_LEVELS.md.",
   "ranks": [
     {"name": "Velocity Finish", "maker": "AugmentedMagic", "verifier": "AXO", "victors": ["AXO"], "frame_perfects": "0"},
-    {"name": "Velocity Battle", "maker": "AugmentedMagic", "verifier": "AXO", "victors": ["AXO"], "frame_perfects": "0"},
+    {"name": "Velocity Battle", "maker": "AugmentedMagic", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "0"},
     {"name": "Neon Gauntlet", "maker": "Claude", "verifier": "AXO", "victors": ["AXO"], "frame_perfects": "1 (60 Hz)"},
     {"name": "Chopper City", "maker": "Claude", "verifier": "AXO", "victors": ["AXO"], "frame_perfects": "0"},
-    {"name": "Inferno Circuit", "maker": "Claude", "verifier": "AXO", "victors": ["AXO"], "frame_perfects": "0"}
+    {"name": "Inferno Circuit", "maker": "Claude", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "0"}
   ]
 }
