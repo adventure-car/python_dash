@@ -3,8 +3,8 @@
   "ranks": [
     {"name": "Velocity Finish", "maker": "AugmentedMagic", "verifier": "AXO", "victors": ["AXO"], "frame_perfects": "0"},
     {"name": "Velocity Battle", "maker": "AugmentedMagic", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "0"},
-    {"name": "Neon Gauntlet", "maker": "Claude", "verifier": "AXO", "victors": ["AXO"], "frame_perfects": "1 (60 Hz)"},
-    {"name": "Chopper City", "maker": "Claude", "verifier": "AXO", "victors": ["AXO"], "frame_perfects": "0"},
+    {"name": "Neon Gauntlet", "maker": "Claude", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "1 (60 Hz)"},
+    {"name": "Chopper City", "maker": "Claude", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "0"},
     {"name": "Inferno Circuit", "maker": "Claude", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "0"}
   ]
 }
