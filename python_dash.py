@@ -294,10 +294,25 @@ SERVER_URL = (os.environ.get("PYTHON_DASH_SERVER") or "").strip().rstrip("/")
 BACKUP_SERVER_URLS = []          # none yet - add the AWS server here when you have one
 BACKUP_SERVER_URLS += [u for u in (os.environ.get("PYTHON_DASH_BACKUP_SERVERS") or "")
                        .split(",") if u.strip()]
+# The server on THIS computer (the host's) is always tried last, so the host's game
+# connects even without SERVER_URL.  On anyone else's computer nothing answers there and
+# it's skipped straight away.
+LOCAL_SERVER_URL = "http://127.0.0.1:8765"
 SERVER_URLS = [u.strip().rstrip("/") for u in [SERVER_URL] + BACKUP_SERVER_URLS
-               if u and u.strip()]
+               + [LOCAL_SERVER_URL] if u and u.strip()]
 SERVER_URLS = list(dict.fromkeys(SERVER_URLS))       # (no repeats, order kept)
-SERVER_ON = bool(SERVER_URLS)
+
+
+def _local_server_up():
+    try:
+        with urllib.request.urlopen(LOCAL_SERVER_URL + "/api/status", timeout=0.5) as r:
+            return bool(json.loads(r.read().decode("utf-8")).get("ok"))
+    except Exception:
+        return False
+
+
+# Server accounts are used when a server is set up above, or one runs on this computer.
+SERVER_ON = bool(SERVER_URL or BACKUP_SERVER_URLS) or _local_server_up()
 OLD_SAVE_PATH = os.path.join(os.path.expanduser("~"), ".dash_test_course.json")
 MUSIC_DIR = os.path.join(DATA_DIR, "music")          # songs attached to levels
 MUSIC_EXTS = (".mp3", ".ogg", ".wav", ".flac", ".opus")
