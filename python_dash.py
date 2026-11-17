@@ -14,13 +14,23 @@ Accounts
   for everyone and progress follows you to any computer.  Run from anywhere else, you
   can still play as Guest.  Bonus: put a new version in the folder and everyone has it.
 
-Main levels (AugmentedMagic account only)
------------------------------------------
+The Python Dash server (optional)
+--------------------------------
+  Set SERVER_URL (below, or the PYTHON_DASH_SERVER environment variable) to the address
+  of python_dash_server.py running on the owner's computer.  Then accounts live on the
+  server and progress syncs to its SQLite database automatically every time the game
+  saves, and U (upload) sends levels there for AXO or AugmentedMagic to review; the ones
+  they approve are put in the GitHub repo (levels/, or main_levels/ for main levels).
+
+Main levels (AugmentedMagic and AXO accounts only)
+--------------------------------------------------
   Signed in as AugmentedMagic, a MAIN LEVELS button appears on the home screen.  It lists
   every main level - all the built-in ones (Neon Gauntlet, ...) plus any added through
   the main levels folder.  Rename them, change their difficulty, or hide built-ins.  To
   add a level, drop its .json into the folder (or onto that screen) and set it up.  The
   changes live in the shared online folder, so every player sees them.
+  Main levels in the repo's main_levels/ folder (which only AXO and AugmentedMagic can
+  change) are downloaded automatically and listed too.
 
 Level select has four tabs (LEFT/RIGHT or click):
   Levels        the built-in levels
@@ -32,12 +42,17 @@ Level select has four tabs (LEFT/RIGHT or click):
   Ranks         the official hardest-levels list (the Top 1 earns the Crown).  It is read
                 from hardest_levels.json in the repo, so admins can re-rank without a new
                 release; offline it falls back to the ranks built into this file.
+  Online        levels in the repo, in three sections: BROWSE (all of them), NEWEST 20
+                (the most recent uploads) and SEARCH (name, maker or description).
+                B / N / F switch sections.  Leaving a level you played from here brings
+                you back to the same section, search and level.
 
 Uploading your levels
 ---------------------
-  On the BUILD LEVELS (Your Levels) screen, press U to upload the selected level.  It is
+  On the BUILD LEVELS (Your Levels) screen, press U to upload the selected level.  With a
+  server (SERVER_URL) it goes there for AXO or AugmentedMagic to review.  Otherwise it is
   sent into the shared online folder (PythonDashSubmissions/) as a request - an admin reviews
-  it from the MAIN LEVELS screen and adds the good ones.  Needs a shared folder and sign-in.
+  it from the MAIN LEVELS screen and adds the good ones.  Needs sign-in.
 
 Requirements:  pip install pygame-ce     (plain pygame works too if it installs)
 Run:           python python_dash.py
@@ -48,7 +63,8 @@ Playing
   P  practice mode (respawn at last portal) / normal      H  hitboxes
   R  restart      TAB  settings      ESC  back
   1-9  warp to a section  (only if "Level warping" is enabled in Settings)
-  Every game mode has a floor AND a ceiling.
+  Every game mode has a floor AND a ceiling.  The ceiling is 1 block above the highest
+  object in the level (never lower than 9 blocks); tall levels scroll up and down.
   Coins: grab them and FINISH the level in normal mode to keep them.
 
 Fullscreen:  click the button in the top-right corner of any menu or the editor, or use
@@ -77,6 +93,8 @@ Game modes
   Swing   tap to flip gravity at any time (swing copter)
 Extras (all trigger just by touching them - no button needed, in EVERY mode):
   yellow pad / yellow orb   bounce you up        blue pad / blue orb  slam you down
+  pink pad / pink orb       a weaker bounce      red pad / red orb    a stronger bounce
+  green dash orb            fly straight ahead while you hold (magenta: flips gravity first)
   gravity portals  flip gravity      speed portals  0.8x 1x 1.25x 1.5x 1.8x
   slopes           45-degree (1x1), gentle 1:2 (2 wide) and steep 2:1 (2 tall), facing any
                    way - run up / down them (deadly to the wave)
@@ -103,8 +121,14 @@ Level editor
     MOVE     moves a group (blocks, time, easing)
     REVEAL   makes a group appear (it starts hidden) - or hide it
     LIGHT    flicker on, flicker off, close circle, open circle
+    PARTICLE a burst (or stream) of particles at the trigger or the player
+    PULSE    flashes the whole screen, or one group, a palette colour
+    ROTATE   spins a group around its own middle (or around another group)
+    COUNT    adds to a counter; when it reaches the target a group appears / disappears
   TEXT  click a cell and type - text boxes can be in groups too.
-  Mouse wheel, A/D or arrow keys scroll       Ctrl/Cmd+Z undo, Ctrl/Cmd+Y redo
+  Mouse wheel, A/D or LEFT/RIGHT scroll       Ctrl/Cmd+Z undo, Ctrl/Cmd+Y redo
+  Levels can be built up to 108 blocks high: W/S, UP/DOWN, PAGE UP/DOWN or Shift+wheel
+  scroll up and down (HOME goes back to the start).
   Ctrl/Cmd+S save    P playtest from the start    Shift+P / "PLAY HERE" from the screen
   The first 6 columns are a safe start zone.  Mode portals split the level into
   sections; the "START" button picks the first section's mode.
@@ -129,6 +153,7 @@ import random
 import subprocess
 import sys
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
@@ -153,6 +178,8 @@ DESC_MAX = 80                # longest level description
 NAME_MAX = 28
 SAFE_COLS = 6               # editor: columns at the start where nothing can be placed
 MAX_COLS = 1500             # editor: maximum level length in blocks
+EDIT_ROWS = 108             # editor: how high a level can be built (rows above the floor)
+MIN_CEIL_ROWS = 9           # playing: the ceiling is never lower than this many blocks
 
 # physics tuning ------------------------------------------------------------
 CUBE_G, CUBE_JUMP, CUBE_MAXFALL = 1.1, 13.3, 20
@@ -164,6 +191,20 @@ SPIDER_G, SPIDER_MAXFALL = 1.5, 18
 SWING_A, SWING_MAX = 0.75, 8.5
 PAD_V, ORB_V, DORB_V = 16.0, 12.5, 14.0
 DPAD_V = 16.0                 # a down pad slams you toward the floor
+# weaker (pink) and stronger (red) versions of the yellow jump pad / orb
+JUMP_POWER = {"pad": PAD_V, "ppad": 11.5, "rpad": 20.5,
+              "orb": ORB_V, "porb": 9.0, "rorb": 16.0}
+UP_PADS = ("pad", "ppad", "rpad")
+PADS = UP_PADS + ("dpad",)
+UP_ORBS = ("orb", "porb", "rorb")
+DASH_ORBS = ("dashorb", "gdashorb")       # green dash orb / magenta (gravity-flipping) one
+ORBS = UP_ORBS + ("dorb",) + DASH_ORBS
+PAD_ORB_COLOR = {"pad": (255, 230, 40), "orb": (255, 230, 40),
+                 "ppad": (255, 120, 220), "porb": (255, 120, 220),
+                 "rpad": (255, 70, 70), "rorb": (255, 70, 70),
+                 "dpad": (80, 140, 255), "dorb": (80, 140, 255),
+                 "dashorb": (80, 255, 130), "gdashorb": (255, 80, 255)}
+DASH_MIN, DASH_MAX = 18, 120  # frames a dash lasts: at least DASH_MIN, longer while held
 SPEED_VALUES = (0.8, 1.0, 1.25, 1.5, 1.8)      # speed portal multipliers
 SPEED_COLOR = {0.8: (255, 170, 60), 1.0: (80, 170, 255), 1.25: (90, 230, 120),
                1.5: (255, 90, 200), 1.8: (255, 80, 80)}
@@ -226,13 +267,24 @@ MAIN_DIR = (os.path.join(SHARED_DIR, "PythonDashMainLevels") if SHARED_DIR
 MAIN_META = os.path.join(MAIN_DIR, "_main_levels.json")   # names, difficulties, hidden
 SUBMIT_DIR = (os.path.join(SHARED_DIR, "PythonDashSubmissions") if SHARED_DIR
               else None)                                  # in-game level upload requests
-ADMIN_ACCOUNTS = {"augmentedmagic"}                       # who can manage main levels
+ADMIN_ACCOUNTS = {"augmentedmagic", "axo"}                # who can manage main levels
 MAIN_DIFFICULTIES = ["TEST", "EASY", "NORMAL", "HARD", "INSANE", "DEMON"]
 DIFF_ORDER = ["TEST", "EASY", "NORMAL", "HARD", "INSANE", "DEMON"]
 OTHER_DIR = os.path.join(DATA_DIR, "downloaded_levels")  # levels made by someone else
 OLD_OTHER_DIR = os.path.join(DATA_DIR, "other_levels")    # (its name before)
 REPO = "adventure-car/python_dash"                         # online levels + music live here
 REPO_BRANCH = "main"
+# --------------------------------------------------------------------------
+# The Python Dash server (python_dash_server.py, run on the owner's computer).
+# Put its address here, e.g. "http://203.0.113.7:8765" - or set the PYTHON_DASH_SERVER
+# environment variable.  When it is set:
+#   * accounts (sign in / sign up) live on the server, and progress syncs to it
+#     automatically (its SQLite database), so it follows you to any computer
+#   * U (upload) on the BUILD LEVELS screen sends the level to the server, where
+#     AXO or AugmentedMagic review it; approved levels go into the GitHub repo
+# Left empty, the game works as before (shared online folder, or Guest only).
+# --------------------------------------------------------------------------
+SERVER_URL = (os.environ.get("PYTHON_DASH_SERVER") or "").strip().rstrip("/")
 OLD_SAVE_PATH = os.path.join(os.path.expanduser("~"), ".dash_test_course.json")
 MUSIC_DIR = os.path.join(DATA_DIR, "music")          # songs attached to levels
 MUSIC_EXTS = (".mp3", ".ogg", ".wav", ".flac", ".opus")
@@ -245,13 +297,14 @@ RAMPS = tuple(p + "_" + d for p in RAMP_SIZES for d in ("tl", "tr", "bl", "br"))
 FLOOR_RAMPS = {k for k in RAMPS if k.endswith(("_bl", "_br"))}   # solid BELOW the slope
 SIDE_SPIKES = ("spike_l", "spike_r")                    # spikes pointing left / right
 SOLID = {"block"} | set(RAMPS)
-CELL_KINDS = ({"block", "spike", "pad", "dpad", "orb", "dorb", "coin"} | set(RAMPS)
+CELL_KINDS = ({"block", "spike", "coin"} | set(PADS) | set(ORBS) | set(RAMPS)
               | set(SIDE_SPIKES))
 BG_KINDS = {"block", "spike"} | set(RAMPS) | set(SIDE_SPIKES)  # background (decoration)
 SPIKES = {"spike"} | set(SIDE_SPIKES)
 LIGHT_EFFECTS = ("flicker_on", "flicker_off", "close_circle", "open_circle")
 LIGHT_NAMES = {"flicker_on": "Flicker on", "flicker_off": "Flicker off",
                "close_circle": "Close circle", "open_circle": "Open circle"}
+COUNTER_MAX = 99             # count triggers: item ids 1-99
 TEXT_MAX = 60
 # colour slots for objects (main and background layer).  An object stores a slot
 # number: 0 = automatic (the game mode's colour), 1-10 = the level's own palette,
@@ -278,7 +331,7 @@ class Obj:
     `group` (0 = none) lets move / reveal triggers act on it; ox/oy is how far a
     move trigger has pushed it (pixels) and `hidden` is set by reveal triggers."""
     __slots__ = ("kind", "col", "row", "flip", "up", "val", "rect", "base", "group",
-                 "ox", "oy", "hidden", "color")
+                 "ox", "oy", "hidden", "color", "ang", "base_kind")
 
     def __init__(self, kind, col, row=0, flip=False, up=False, val=1.0, group=0, color=0):
         self.kind, self.col, self.row, self.flip, self.up = kind, col, row, flip, up
@@ -286,6 +339,8 @@ class Obj:
         self.group = group
         self.color = color          # colour slot: 0 = auto, 1-10 = the level's palette
         self.ox = self.oy = 0.0
+        self.ang = 0.0              # degrees, set by rotate triggers (counter-clockwise)
+        self.base_kind = kind
         self.hidden = False
         x = col * B
         y = FLOOR - (row + 1) * B
@@ -300,11 +355,11 @@ class Obj:
             self.rect = pygame.Rect(x, y + 13, 26, 14)
         elif kind == "spike_l":    # base on the right, point to the left
             self.rect = pygame.Rect(x + 14, y + 13, 26, 14)
-        elif kind == "pad":        # sits on the bottom of its cell, bounces you up
+        elif kind in UP_PADS:      # sits on the bottom of its cell, bounces you up
             self.rect = pygame.Rect(x + 2, y + B - 10, B - 4, 10)
         elif kind == "dpad":       # sits on the top of its cell, slams you down
             self.rect = pygame.Rect(x + 2, y, B - 4, 10)
-        elif kind in ("orb", "dorb"):
+        elif kind in ORBS:
             self.rect = pygame.Rect(x + 6, y + 6, 28, 28)
         elif kind == "coin":
             self.rect = pygame.Rect(x + 6, y + 6, 28, 28)
@@ -316,7 +371,46 @@ class Obj:
 
     def shift(self, ox, oy):
         self.ox, self.oy = ox, oy
-        self.rect = self.base.move(int(round(ox)), int(round(oy)))
+        if not self.ang:
+            self.kind = self.base_kind
+            self.rect = self.base.move(int(round(ox)), int(round(oy)))
+            return
+        # rotated by a rotate trigger: the hitbox follows the nearest quarter turn
+        q = int(round(self.ang / 90.0)) % 4
+        b = self.base
+        w, h = (b.h, b.w) if q % 2 else (b.w, b.h)
+        self.kind = rotated_kind(self.base_kind, q)
+        r = pygame.Rect(0, 0, w, h)
+        r.center = (b.centerx + int(round(ox)), b.centery + int(round(oy)))
+        self.rect = r
+
+    def turn(self, dang, px, py):
+        """Rotate this object by dang degrees (counter-clockwise) around (px, py)."""
+        cx = self.base.centerx + self.ox - px
+        cy = self.base.centery + self.oy - py
+        a = math.radians(dang)
+        ca, sa = math.cos(a), math.sin(a)
+        nx, ny = cx * ca + cy * sa, -cx * sa + cy * ca     # (screen y points down)
+        self.ang = (self.ang + dang) % 360.0
+        if abs(self.ang) < 1e-6 or abs(self.ang - 360.0) < 1e-6:
+            self.ang = 0.0
+        self.shift(self.ox + nx - cx, self.oy + ny - cy)
+
+
+_CCW = {"br": "tr", "tr": "tl", "tl": "bl", "bl": "br"}
+
+
+def rotated_kind(kind, quarter_turns):
+    """The slope kind you get turning `kind` by a number of 90-degree steps (counter-
+    clockwise).  A 2-wide gentle slope turned sideways becomes a 2-tall steep one."""
+    if kind not in RAMPS or not quarter_turns % 4:
+        return kind
+    size, d = kind.split("_")
+    for _ in range(quarter_turns % 4):
+        d = _CCW[d]
+        if size != "ramp":
+            size = "sramp" if size == "gramp" else "gramp"
+    return size + "_" + d
 
 
 class TextObj:
@@ -330,6 +424,14 @@ class TextObj:
 
     def shift(self, ox, oy):
         self.ox, self.oy = ox, oy
+
+    def turn(self, dang, px, py):
+        cx = self.col * B + B / 2 + self.ox - px
+        cy = FLOOR - (self.row + 1) * B + B / 2 + self.oy - py
+        a = math.radians(dang)
+        nx = cx * math.cos(a) + cy * math.sin(a)
+        ny = -cx * math.sin(a) + cy * math.cos(a)
+        self.shift(self.ox + nx - cx, self.oy + ny - cy)
 
 
 def ramp_size(kind):
@@ -399,6 +501,11 @@ def solid_hit(o, r):
     return r.bottom - orc.top, y - r.top
 
 
+def mix(a, b, u):
+    """Colour a blended u (0..1) of the way toward colour b."""
+    return tuple(int(x + (y - x) * u) for x, y in zip(a, b))
+
+
 def draw_dashed_rect(surface, rect, color, dash=5, gap=4, width=2):
     """Dashed outline - how the editor marks invisible objects."""
     x0, y0, x1, y1 = rect.left, rect.top, rect.right - 1, rect.bottom - 1
@@ -449,6 +556,33 @@ def clean_trigger(j):
             return None
         return {"type": "light", "effect": e, "radius": round(num("radius", 3, 1, 12), 2),
                 "time": round(num("time", 0.5, 0, 10), 2)}
+    if t == "particle":
+        return {"type": "particle", "color": int(num("color", 0, 0, COLOR_SLOTS - 1)),
+                "count": int(num("count", 30, 1, 200)),
+                "spread": round(num("spread", 2, 0.5, 10), 2),
+                "time": round(num("time", 0, 0, 10), 2),
+                "size": int(num("size", 5, 2, 14)),
+                "gravity": round(num("gravity", 0.2, -1, 1), 2),
+                "at": "player" if j.get("at") == "player" else "trigger"}
+    if t == "pulse":
+        return {"type": "pulse", "target": "group" if j.get("target") == "group" else "screen",
+                "group": int(num("group", 1, 1, GROUP_MAX)),
+                "color": int(num("color", 1, 1, COLOR_SLOTS - 1)),
+                "fade_in": round(num("fade_in", 0.1, 0, 10), 2),
+                "hold": round(num("hold", 0.2, 0, 10), 2),
+                "fade_out": round(num("fade_out", 0.5, 0, 10), 2),
+                "strength": round(num("strength", 0.6, 0.05, 1), 2)}
+    if t == "rotate":
+        return {"type": "rotate", "group": int(num("group", 1, 1, GROUP_MAX)),
+                "degrees": round(num("degrees", 90, -3600, 3600), 2),
+                "center": int(num("center", 0, 0, GROUP_MAX)),
+                "time": round(num("time", 0.5, 0, 10), 2), "ease": bool(j.get("ease", True))}
+    if t == "count":
+        return {"type": "count", "item": int(num("item", 1, 1, COUNTER_MAX)),
+                "add": int(num("add", 1, -100, 100)),
+                "target": int(num("target", 3, -999, 999)),
+                "group": int(num("group", 1, 1, GROUP_MAX)),
+                "show": bool(j.get("show", True))}
     return None
 
 
@@ -459,8 +593,21 @@ def default_trigger(tool, group):
         return clean_trigger({"type": "move", "group": g, "dx": 0, "dy": 2, "time": 0.5})
     if tool == "trig:reveal":
         return clean_trigger({"type": "reveal", "group": g, "show": True})
+    if tool in ("trig:particle", "trig:pulse", "trig:rotate", "trig:count"):
+        return clean_trigger({"type": tool[5:], "group": g})
     return clean_trigger({"type": "light", "effect": tool.split(":")[1], "radius": 3,
                           "time": 0.5})
+
+
+def ceil_rows_for(top, top_anchor=None):
+    """How many blocks high the ceiling is when the highest object reaches row `top`
+    (0 = the bottom row): one block above it, never lower than MIN_CEIL_ROWS.  Levels
+    made for the classic 10-block corridor (an object placed in its top row, or a tall
+    slope poking out of it) keep that ceiling."""
+    anchor = top if top_anchor is None else top_anchor
+    if anchor <= ROWS - 1 <= top:
+        return ROWS
+    return max(MIN_CEIL_ROWS, top + 2)
 
 
 def ease(t):
@@ -612,16 +759,39 @@ class Level:
             for r in range(row, row + h):
                 self.bg_objs.append(Obj(kind, c, r, flip=flip, group=group, color=color))
 
-    # ---- indexing + runtime state (move / reveal / light triggers) ----------
+    # ---- indexing + runtime state (move / reveal / light / ... triggers) -------
+    def top_row(self, anchor=False):
+        """Highest row any main-layer object reaches (-1 for an empty level).  With
+        anchor=True: the highest row an object is placed in (tall slopes not counted)."""
+        top = -1
+        for o in self.objs:
+            if o.kind in ("grav", "speed"):
+                continue
+            h = ramp_size(o.kind)[1] if (o.kind in RAMPS and not anchor) else 1
+            top = max(top, o.row + h - 1)
+        for t in self.texts:
+            top = max(top, t.row)
+        return top
+
     def finalize(self):
+        # The ceiling sits one block above the highest object (never lower than
+        # MIN_CEIL_ROWS).  A level built for the classic 10-block corridor - something
+        # touching row 10 - keeps its ceiling right on top of it, as before.
+        self.ceil_rows = ceil_rows_for(self.top_row(), self.top_row(anchor=True))
+        self.ceil_y = FLOOR - self.ceil_rows * B
+        for o in self.objs:                      # portals reach all the way up
+            if o.kind in ("grav", "speed"):
+                o.base = o.rect = pygame.Rect(o.col * B + 14, self.ceil_y, 12,
+                                              FLOOR - self.ceil_y)
+
         trig = sorted(self.triggers, key=lambda t: (t[0], t[1]))
-        self.move_groups = {c["group"] for _, _, c in trig if c["type"] == "move"}
+        self.move_groups = {c["group"] for _, _, c in trig if c["type"] in ("move", "rotate")}
         first = {}
         for _, _, c in trig:
-            if c["type"] == "reveal":
+            if c["type"] in ("reveal", "count"):
                 first.setdefault(c["group"], c["show"])
         self.start_hidden = {g for g, show in first.items() if show}
-        self.trig_list = [(col * B, c) for col, _, c in trig]
+        self.trig_list = [(col * B, c, col, row) for col, row, c in trig]
 
         self.groups = defaultdict(list)
         self.cols = defaultdict(list)
@@ -659,14 +829,20 @@ class Level:
         for g, objs in self.groups.items():
             hid = g in self.start_hidden
             for o in objs:
+                if isinstance(o, Obj):
+                    o.ang = 0.0
                 o.shift(0.0, 0.0)
                 o.hidden = hid
-        self.goff = defaultdict(lambda: [0.0, 0.0])
         self.moves = []
+        self.turns = []          # running rotate triggers
         self.light = Light()
+        self.counters = defaultdict(int)     # count triggers: item id -> count
+        self.emitters = []       # running particle triggers: [x, y, cfg, frames left]
+        self.spawned = []        # particles waiting to be picked up by the game
+        self.pulses = []         # running pulse triggers: [cfg, rgb, frame]
         self.next_trig = 0
         while self.next_trig < len(self.trig_list) and self.trig_list[self.next_trig][0] <= x:
-            self.fire(self.trig_list[self.next_trig][1], True)
+            self.fire(*self.trig_list[self.next_trig][1:], instant=True)
             self.next_trig += 1
         self._update_hidden()
 
@@ -674,13 +850,33 @@ class Level:
         self.has_hidden = any(o.hidden for objs in self.groups.values() for o in objs)
 
     def _shift_group(self, g, dx, dy):
-        off = self.goff[g]
-        off[0] += dx
-        off[1] += dy
         for o in self.groups.get(g, ()):
-            o.shift(off[0], off[1])
+            o.shift(o.ox + dx, o.oy + dy)
 
-    def fire(self, cfg, instant=False):
+    def group_center(self, g):
+        """Middle of a group's objects where they are right now (None if it's empty)."""
+        xs, ys = [], []
+        for o in self.groups.get(g, ()):
+            if isinstance(o, Obj):
+                xs += [o.rect.left, o.rect.right]
+                ys += [o.rect.top, o.rect.bottom]
+            else:
+                x = o.col * B + o.ox
+                y = FLOOR - (o.row + 1) * B + o.oy
+                xs += [x, x + B]
+                ys += [y, y + B]
+        if not xs:
+            return None
+        return (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+
+    def _turn_group(self, g, dang, center):
+        piv = center if isinstance(center, tuple) else self.group_center(center)
+        if piv is None:
+            return
+        for o in self.groups.get(g, ()):
+            o.turn(dang, piv[0], piv[1])
+
+    def fire(self, cfg, col=0, row=0, instant=False):
         t = cfg["type"]
         if t == "move":
             dx, dy = cfg["dx"] * B, -cfg["dy"] * B
@@ -689,18 +885,43 @@ class Level:
                 self._shift_group(cfg["group"], dx, dy)
             else:
                 self.moves.append([cfg["group"], dx, dy, n, 0, cfg["ease"]])
+        elif t == "rotate":
+            g = cfg["group"]
+            # around another group's middle (it can move), or the group's own middle
+            center = cfg["center"] if cfg["center"] and cfg["center"] != g else \
+                self.group_center(g)
+            if center is None:
+                return
+            n = int(round(cfg["time"] * FPS))
+            if instant or n <= 0:
+                self._turn_group(g, cfg["degrees"], center)
+            else:
+                self.turns.append([g, cfg["degrees"], center, n, 0, cfg["ease"]])
         elif t == "reveal":
             for o in self.groups.get(cfg["group"], ()):
                 o.hidden = not cfg["show"]
             if not instant:
                 self._update_hidden()
+        elif t == "count":
+            self.counters[cfg["item"]] += cfg["add"]
+            if self.counters[cfg["item"]] == cfg["target"]:
+                self.fire({"type": "reveal", "group": cfg["group"], "show": cfg["show"]},
+                          instant=instant)
         elif t == "light":
             self.light.trigger(cfg, instant)
+        elif t == "particle":
+            if not instant:          # (no fireworks for triggers you respawned past)
+                x, y = col * B + B / 2, FLOOR - (row + 1) * B + B / 2
+                self.emitters.append([x, y, cfg, max(1, int(round(cfg["time"] * FPS)))])
+        elif t == "pulse":
+            if not instant:
+                rgb = tuple(self.palette[cfg["color"] - 1])
+                self.pulses.append([cfg, rgb, 0])
 
-    def update(self, x):
-        """Advance triggers by one frame for a player at world x."""
+    def update(self, x, y=None):
+        """Advance triggers by one frame for a player at world (x, y)."""
         while self.next_trig < len(self.trig_list) and self.trig_list[self.next_trig][0] <= x:
-            self.fire(self.trig_list[self.next_trig][1])
+            self.fire(*self.trig_list[self.next_trig][1:])
             self.next_trig += 1
         if self.moves:
             keep = []
@@ -713,7 +934,75 @@ class Level:
                 if m[4] < n:
                     keep.append(m)
             self.moves = keep
+        if self.turns:
+            keep = []
+            for m in self.turns:
+                g, deg, center, n, done, smooth = m
+                f = ease if smooth else (lambda u: u)
+                a, b = f(done / n), f((done + 1) / n)
+                self._turn_group(g, deg * (b - a), center)
+                m[4] = done + 1
+                if m[4] < n:
+                    keep.append(m)
+            self.turns = keep
+        if self.emitters:
+            keep = []
+            for em in self.emitters:
+                ex, ey, cfg, left = em
+                total = max(1, int(round(cfg["time"] * FPS)))
+                n = cfg["count"] if total == 1 else (
+                    cfg["count"] * (total - left + 1) // total
+                    - cfg["count"] * (total - left) // total)
+                if cfg["at"] == "player":
+                    ex, ey = x, (y if y is not None else ey)
+                for _ in range(n):
+                    self.spawned.append((ex, ey, cfg))
+                em[3] = left - 1
+                if em[3] > 0:
+                    keep.append(em)
+            self.emitters = keep
+        if self.pulses:
+            for pu in self.pulses:
+                pu[2] += 1
+            self.pulses = [pu for pu in self.pulses if pu[2] <= self.pulse_len(pu[0])]
         self.light.update()
+
+    @staticmethod
+    def pulse_len(cfg):
+        return int(round((cfg["fade_in"] + cfg["hold"] + cfg["fade_out"]) * FPS))
+
+    @staticmethod
+    def pulse_amount(cfg, frame):
+        fi, ho, fo = (cfg["fade_in"] * FPS, cfg["hold"] * FPS, cfg["fade_out"] * FPS)
+        if frame < fi:
+            u = frame / fi
+        elif frame < fi + ho:
+            u = 1.0
+        elif fo > 0:
+            u = max(0.0, 1.0 - (frame - fi - ho) / fo)
+        else:
+            u = 0.0
+        return u * cfg["strength"]
+
+    def screen_pulse(self):
+        """(rgb, 0..1) of the strongest screen pulse running now, or None."""
+        best = None
+        for cfg, rgb, fr in self.pulses:
+            if cfg["target"] == "screen":
+                a = self.pulse_amount(cfg, fr)
+                if best is None or a > best[1]:
+                    best = (rgb, a)
+        return best
+
+    def group_tints(self):
+        """{group: (rgb, 0..1)} for the group pulses running now."""
+        out = {}
+        for cfg, rgb, fr in self.pulses:
+            if cfg["target"] == "group":
+                a = self.pulse_amount(cfg, fr)
+                if a > out.get(cfg["group"], (None, 0))[1]:
+                    out[cfg["group"]] = (rgb, a)
+        return out
 
     def speed_at(self, x):
         """Speed multiplier in effect at world x (set by the last speed portal passed)."""
@@ -844,7 +1133,15 @@ class LevelData:
                 + len(self.gravs) + len(self.portals) + len(self.speeds))
 
     def coin_count(self):
-        return sum(1 for k, _, _ in self.cells.values() if k == "coin")
+        return sum(1 for k, _, _, _ in self.cells.values() if k == "coin")
+
+    def top_row(self, anchor=False):
+        top = -1
+        for (c, r), v in self.cells.items():
+            top = max(top, r + (ramp_size(v[0])[1] - 1 if v[0] in RAMPS and not anchor else 0))
+        for (c, r) in self.texts:
+            top = max(top, r)
+        return top
 
     def build(self, lv):
         lv.sections = [(self.start_mode, 0)] + [
@@ -915,7 +1212,7 @@ class LevelData:
                     c, r = int(c), int(r)
                 except (TypeError, ValueError):
                     continue
-                if k in kinds and 0 <= r < ROWS and 0 <= c < MAX_COLS:
+                if k in kinds and 0 <= r < EDIT_ROWS and 0 <= c < MAX_COLS:
                     v = (k, bool(f), max(0, min(GROUP_MAX, g)))
                     if colored:
                         v += (col if 0 <= col < COLOR_SLOTS else 0,)
@@ -935,14 +1232,14 @@ class LevelData:
                 c, r, t, g = int(item[0]), int(item[1]), str(item[2]), int(item[3])
             except (TypeError, ValueError, IndexError):
                 continue
-            if 0 <= r < ROWS and 0 <= c < MAX_COLS and t:
+            if 0 <= r < EDIT_ROWS and 0 <= c < MAX_COLS and t:
                 d.texts[(c, r)] = (t[:TEXT_MAX], max(0, min(GROUP_MAX, g)))
         for item in j.get("triggers") or []:
             try:
                 c, r, cfg = int(item[0]), int(item[1]), clean_trigger(item[2])
             except (TypeError, ValueError, IndexError):
                 continue
-            if cfg and 0 <= r < ROWS and 0 <= c < MAX_COLS:
+            if cfg and 0 <= r < EDIT_ROWS and 0 <= c < MAX_COLS:
                 d.triggers[(c, r)] = cfg
         for c, u in j.get("gravs", []):
             if 0 <= int(c) < MAX_COLS:
@@ -2250,6 +2547,8 @@ class Player:
         self.mini = False            # mini wave
         self.wave_hold = False       # wave control: False = click to switch, True = hold to rise
         self.trail = deque(maxlen=28)
+        self.ceil = CEIL             # y of this level's ceiling (set on respawn)
+        self.dash = 0                # frames into a dash-orb dash (0 = not dashing)
 
     @property
     def speed(self):
@@ -2274,8 +2573,9 @@ class Player:
         half = self.h / 2
         self.y = min(self.y, FLOOR - half)
         if mode in CEIL_MODES:
-            self.y = max(self.y, CEIL + half)
+            self.y = max(self.y, self.ceil + half)
         self.robot_jumping = False
+        self.dash = 0
         self.robot_t = 0
         self.wave_dir = 1
         self.trail.clear()
@@ -2285,6 +2585,7 @@ class Player:
         self.section = sec
         self.x = 3.0 * B if sec == 0 else float(level.starts_px[sec])
         self.speed_mult = level.speed_at(self.x)
+        self.ceil = level.ceil_y
         self.y = 240.0
         self.vy = 0.0
         self.g = 1
@@ -2333,7 +2634,7 @@ class Player:
         half = self.h / 2
         r = self.rect()
         if new_g == -1:      # go up
-            best = CEIL
+            best = self.ceil
             for o in level.near(self.x):
                 if (o.kind in SOLID and o.rect.right > r.left
                         and o.rect.left < r.right and o.rect.bottom <= r.top):
@@ -2353,6 +2654,15 @@ class Player:
     def control(self, held, level):
         m, g = self.mode, self.g
         press = self.buffer > 0
+        if self.dash:                    # dash orb: fly straight ahead, no gravity
+            self.dash += 1
+            if self.dash > DASH_MAX or (self.dash > DASH_MIN and not held):
+                self.dash = 0            # ...until you let go (or it runs out)
+            else:
+                self.vy = 0.0
+                self.buffer = 0
+                self.on_ground = False
+                return
 
         if m == "cube":
             if self.on_ground and (held or press):
@@ -2545,8 +2855,8 @@ class Player:
                 self.vy = 0.0
             if self.g == 1:
                 self.on_ground = True
-        if mode in CEIL_MODES and self.y - half <= CEIL:
-            self.y = CEIL + half
+        if mode in CEIL_MODES and self.y - half <= self.ceil:
+            self.y = self.ceil + half
             if self.vy < 0:
                 self.vy = 0.0
             if self.g == -1:
@@ -2560,11 +2870,12 @@ class Player:
                 if r.colliderect(o.rect) and not game.noclip:
                     game.kill()
                     return
-            elif k in ("pad", "dpad"):
-                # pads fire whenever you touch them: yellow bounces you up, blue slams
-                # you down (they ignore you if you're already moving that way)
+            elif k in PADS:
+                # pads fire whenever you touch them: yellow / pink / red bounce you up
+                # (normal / weaker / stronger), blue slams you down (they ignore you if
+                # you're already moving that way)
                 if r.colliderect(o.rect):
-                    up = k == "pad"
+                    up = k != "dpad"
                     if mode == "wave":
                         fire = self.wave_dir != (-1 if up else 1)
                     elif up:
@@ -2572,9 +2883,9 @@ class Player:
                     else:
                         fire = self.vy * self.g < DPAD_V - 0.5
                     if fire:
-                        self.bounce(up, PAD_V if up else DPAD_V)
-                        game.burst(o.rect.centerx, o.rect.centery,
-                                   (255, 230, 40) if up else (90, 150, 255), 10)
+                        self.dash = 0
+                        self.bounce(up, JUMP_POWER[k] if up else DPAD_V)
+                        game.burst(o.rect.centerx, o.rect.centery, PAD_ORB_COLOR[k], 10)
             elif k == "coin":
                 key = (o.col, o.row)
                 if key not in self.coins and r.colliderect(o.rect):
@@ -2586,17 +2897,27 @@ class Player:
             elif k == "speed":
                 if r.colliderect(o.rect):
                     self.speed_mult = o.val
-            elif k in ("orb", "dorb"):
+            elif k in ORBS:
                 # orbs fire automatically when you touch them (once per attempt):
-                # yellow bounces you up, blue slams you down
+                # yellow / pink / red bounce you up (normal / weaker / stronger), blue
+                # slams you down, and dash orbs send you flying straight ahead for as
+                # long as you hold (the magenta one flips gravity first)
                 key = (o.col, o.row)
                 if (key not in self.used_orbs
                         and math.hypot(self.x - o.rect.centerx,
                                        self.y - o.rect.centery) < ORB_RADIUS):
                     self.used_orbs = self.used_orbs | {key}
-                    self.bounce(k == "orb", ORB_V if k == "orb" else DORB_V)
-                    game.burst(o.rect.centerx, o.rect.centery,
-                               (255, 230, 40) if k == "orb" else (90, 150, 255), 14)
+                    if k in DASH_ORBS:
+                        if k == "gdashorb":
+                            self.g = -self.g
+                        self.vy = 0.0
+                        self.dash = 1
+                        self.on_ground = False
+                        self.robot_jumping = False
+                    else:
+                        self.dash = 0
+                        self.bounce(k != "dorb", JUMP_POWER[k] if k != "dorb" else DORB_V)
+                    game.burst(o.rect.centerx, o.rect.centery, PAD_ORB_COLOR[k], 14)
 
         # --- visuals ---------------------------------------------------------
         if mode == "cube":
@@ -2607,6 +2928,9 @@ class Player:
                 self.rot -= 7.5 * self.g
         elif mode == "ball":
             self.rot -= 8.0 * self.g
+        if self.dash and self.anim % 2 == 0:            # dash streak
+            game.burst(self.x - self.w / 2, self.y,
+                       PAD_ORB_COLOR["gdashorb" if self.g == -1 else "dashorb"], 2)
         if mode == "wave":
             self.trail.append((self.x, self.y))
         elif self.trail:
@@ -3216,6 +3540,8 @@ def write_save(data):
         if merged is not data:
             data.clear()
             data.update(merged)
+        if path != SAVE_PATH:
+            _sync.push(data)            # signed in to a server account: sync it
     except Exception:
         pass
 
@@ -3366,11 +3692,125 @@ def check_login(accounts, name, password):
     return u if good else None
 
 
+def store_server_session(user):
+    """Remember (on this computer) which server account is signed in, or forget it."""
+    local = _read_local_accounts()
+    if user:
+        local["server_session"] = {"url": SERVER_URL, "name": user["name"],
+                                   "token": user["token"]}
+    else:
+        local.pop("server_session", None)
+    write_json(ACCOUNTS_PATH, local)
+
+
+def saved_server_session():
+    sess = _read_local_accounts().get("server_session")
+    if (isinstance(sess, dict) and sess.get("url") == SERVER_URL and SERVER_URL
+            and isinstance(sess.get("name"), str) and isinstance(sess.get("token"), str)):
+        return {"name": sess["name"], "token": sess["token"], "server": True}
+    return None
+
+
 def account_save_path(user, root=None):
+    if user.get("server"):          # server account: a copy of its progress lives here too
+        return os.path.join(ACCOUNT_DIR, "server-" + user_file_name(account_key(user["name"])))
     base = os.path.join(root, "progress") if root else ACCOUNT_DIR
     return os.path.join(base, os.path.basename(user["file"]))
 
 
+
+
+# --------------------------------------------------------------------------
+# Talking to the Python Dash server (SERVER_URL)
+# --------------------------------------------------------------------------
+class ServerError(Exception):
+    def __init__(self, msg, status=0):
+        super().__init__(msg)
+        self.status = status
+
+
+def server_call(method, path, body=None, token=None, timeout=12):
+    """One JSON request to the server.  Returns the reply (a dict) or raises ServerError
+    with a message that can be shown to the player."""
+    if not SERVER_URL:
+        raise ServerError("No server is set up")
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"User-Agent": "PythonDash", "Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(SERVER_URL + path, data=data, headers=headers,
+                                 method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            reply = json.loads(r.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as ex:
+        try:
+            msg = json.loads(ex.read().decode("utf-8")).get("error")
+        except Exception:
+            msg = None
+        raise ServerError(msg or "The server said no (%d)" % ex.code, ex.code)
+    except Exception:
+        raise ServerError("Can't reach the Python Dash server")
+    if not isinstance(reply, dict):
+        raise ServerError("The server sent something odd back")
+    return reply
+
+
+def progress_only(data):
+    """What gets synced: everything but this computer's settings."""
+    return {k: v for k, v in data.items() if k != "__settings__"}
+
+
+class ProgressSync:
+    """Sends progress to the server in the background, automatically, every time the
+    game saves.  Only the newest copy is sent; if the server can't be reached it tries
+    again a little later (and the server merges, so nothing is ever lost)."""
+
+    def __init__(self):
+        self.token = None
+        self.pending = None
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.merged = None          # progress the server sent back (merged), for the game
+        self.thread = None
+
+    def start(self, token):
+        self.token = token
+        if not self.thread:
+            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        with self.lock:
+            self.token, self.pending = None, None
+
+    def push(self, data):
+        if not self.token:
+            return
+        with self.lock:
+            self.pending = copy.deepcopy(progress_only(data))
+        self.wake.set()
+
+    def run(self):
+        while True:
+            self.wake.wait(30)
+            self.wake.clear()
+            with self.lock:
+                data, token = self.pending, self.token
+            if data is None or not token:
+                continue
+            try:
+                reply = server_call("PUT", "/api/progress", {"progress": data}, token)
+                with self.lock:
+                    if self.pending is data:
+                        self.pending = None
+                    if isinstance(reply.get("progress"), dict):
+                        self.merged = reply["progress"]
+            except ServerError:
+                pass                    # offline: try again on the next save (or in 30 s)
+
+
+_sync = ProgressSync()
 
 
 # --------------------------------------------------------------------------
@@ -3411,6 +3851,57 @@ def repo_list(path, exts):
 
 
 HARDEST_FILE = "hardest_levels.json"   # the curated hardest-levels list (admins edit it)
+# Main levels kept in the repo's main_levels/ folder (only AXO and AugmentedMagic can
+# change it - see .github/CODEOWNERS).  A copy is kept here so they work offline too.
+REPO_MAIN_FOLDER = "main_levels"
+REPO_MAIN_DIR = os.path.join(DATA_DIR, "repo_main_levels")
+REPO_MAIN_META = os.path.join(REPO_MAIN_DIR, "_main_levels.json")
+
+
+def fetch_repo_main_levels(out):
+    """Download the main levels in the repo's main_levels/ folder into REPO_MAIN_DIR.
+    Each level needs a difficulty: from main_levels/_main_levels.json
+    ({"file.json": {"name": ..., "difficulty": "HARD"}}) or a "difficulty" in the file."""
+    try:
+        files = repo_list(REPO_MAIN_FOLDER, (".json",))
+        meta = {}
+        for fn, url in files:
+            if fn == "_main_levels.json":
+                try:
+                    m = json.loads(http_get(url).decode("utf-8"))
+                    meta.update(m if isinstance(m, dict) else {})
+                except Exception:
+                    pass
+        os.makedirs(REPO_MAIN_DIR, exist_ok=True)
+        keep = {"_main_levels.json"}
+        for fn, url in files:
+            if fn.startswith("_"):
+                continue
+            try:
+                raw = http_get(url)
+                j = json.loads(raw.decode("utf-8"))
+                LevelData.from_json(dict(j, music_data=None))      # a real level?
+            except Exception:
+                continue
+            info = dict(meta.get(fn) or {}) if isinstance(meta.get(fn), dict) else {}
+            if info.get("difficulty") not in MAIN_DIFFICULTIES:
+                d = str(j.get("difficulty") or "").upper()
+                info["difficulty"] = d if d in MAIN_DIFFICULTIES else "HARD"
+            meta[fn] = info
+            keep.add(fn)
+            with open(os.path.join(REPO_MAIN_DIR, os.path.basename(fn)), "wb") as f:
+                f.write(raw)
+        for fn in os.listdir(REPO_MAIN_DIR):           # removed from the repo: remove here
+            if fn not in keep and fn.endswith(".json"):
+                try:
+                    os.remove(os.path.join(REPO_MAIN_DIR, fn))
+                except OSError:
+                    pass
+        write_json(REPO_MAIN_META, {k: v for k, v in meta.items() if k in keep})
+        out["status"] = "ok"
+    except Exception as ex:
+        out["status"] = "error"
+        out["err"] = str(ex)
 
 
 def fetch_hardest(out):
@@ -3433,7 +3924,7 @@ def fetch_online_levels(out):
     """Fill out["levels"] with what's online: name, author, modes and the raw file."""
     try:
         found = []
-        for fn, url in repo_list("levels", (".json",))[:80]:
+        for fn, url in repo_list("levels", (".json",))[:150]:
             try:
                 raw = http_get(url)
                 j = json.loads(raw.decode("utf-8"))
@@ -3441,7 +3932,8 @@ def fetch_online_levels(out):
                 d = LevelData.from_json(j)
                 found.append({"file": fn, "raw": raw, "name": d.name, "author": d.author,
                               "modes": d.mode_list(), "objects": d.object_count(),
-                              "music": j.get("music") or ""})
+                              "music": j.get("music") or "", "description": d.description,
+                              "uploaded": str(j.get("uploaded_at") or "")})
             except Exception:
                 continue
         out["levels"] = found
@@ -3486,7 +3978,10 @@ TAB_DEFS = {
         ("SLOPES", SLOPE_ROWS),
         ("PADS & ORBS", [[("pad", "PAD"), ("dpad", "PAD v"), ("orb", "ORB"), ("dorb", "ORB v"),
                           ("ipad", "I-PAD"), ("idpad", "I-PAD v"), ("iorb", "I-ORB"),
-                          ("idorb", "I-ORB v")], []]),
+                          ("idorb", "I-ORB v")],
+                         [("ppad", "PAD -"), ("rpad", "PAD +"), ("porb", "ORB -"),
+                          ("rorb", "ORB +"), ("dashorb", "DASH"), ("gdashorb", "DASH G"),
+                          ("idashorb", "I-DASH"), ("igdashorb", "I-DASH G")]]),
         ("PORTALS", [[("portal:" + m, m.upper()) for m in MODE_ORDER],
                      [("portal:miniwave", "MINI WAVE"), ("finish", "FINISH"),
                       ("grav_d", "GRAV v"), ("grav_u", "GRAV ^")]]),
@@ -3494,7 +3989,9 @@ TAB_DEFS = {
         ("TRIGGERS", [[("trig:move", "MOVE"), ("trig:reveal", "REVEAL"),
                        ("light:flicker_on", "FLICK ON"), ("light:flicker_off", "FLICK OFF"),
                        ("light:close_circle", "CLOSE"),
-                       ("light:open_circle", "OPEN")], []]),
+                       ("light:open_circle", "OPEN")],
+                      [("trig:particle", "PARTICLE"), ("trig:pulse", "PULSE"),
+                       ("trig:rotate", "ROTATE"), ("trig:count", "COUNT")]]),
     ],
     "bg": [
         ("BACKGROUND", [[("block", "BLOCK"), ("spike", "SPIKE ^"), ("spike_d", "SPIKE v"),
@@ -3515,6 +4012,15 @@ TOOL_HELP = {
     "light:flicker_off": "Light trigger - lights flicker off",
     "light:close_circle": "Light trigger - darkness closes in to a circle around you",
     "light:open_circle": "Light trigger - the circle of light opens back up",
+    "trig:particle": "Particle trigger - a burst (or a stream) of particles",
+    "trig:pulse": "Pulse trigger - flashes the screen, or a group, a colour",
+    "trig:rotate": "Rotate trigger - spins a group (around itself or another group)",
+    "trig:count": "Count trigger - adds to a counter; at the target it reveals / hides a group",
+    "ppad": "Pink pad - a weaker jump pad", "rpad": "Red pad - a stronger jump pad",
+    "porb": "Pink orb - a weaker jump orb", "rorb": "Red orb - a stronger jump orb",
+    "dashorb": "Dash orb - fly straight ahead while you hold",
+    "gdashorb": "Gravity dash orb - flips gravity, then dashes straight ahead",
+    "idashorb": "Invisible dash orb", "igdashorb": "Invisible gravity dash orb",
     "select": "Select: drag an area, then Ctrl+C / X / V, DELETE, G = set group",
     "color": "Colour for new background blocks (with a selection: recolours it)."
              "  Right-click to edit",
@@ -3541,13 +4047,22 @@ TOOL_CELL = {
     "dorb": ("dorb", False),
     "ipad": ("pad", True), "idpad": ("dpad", True), "iorb": ("orb", True),
     "idorb": ("dorb", True), "coin": ("coin", False),
+    "ppad": ("ppad", False), "rpad": ("rpad", False), "porb": ("porb", False),
+    "rorb": ("rorb", False), "dashorb": ("dashorb", False), "gdashorb": ("gdashorb", False),
+    "idashorb": ("dashorb", True), "igdashorb": ("gdashorb", True),
 }
 for _k in RAMPS:
     TOOL_CELL[_k] = (_k, False)
 CELL_TOOLS = tuple(TOOL_CELL)
-GHOST_BASE = {"ipad": "pad", "idpad": "dpad", "iorb": "orb", "idorb": "dorb"}
+GHOST_BASE = {"ipad": "pad", "idpad": "dpad", "iorb": "orb", "idorb": "dorb",
+              "idashorb": "dashorb", "igdashorb": "gdashorb"}
 PORTAL_MIN_COL = 4
-TRIG_COLOR = {"move": (110, 255, 160), "reveal": (255, 150, 255), "light": (255, 235, 120)}
+TRIG_COLOR = {"move": (110, 255, 160), "reveal": (255, 150, 255), "light": (255, 235, 120),
+              "particle": (255, 170, 90), "pulse": (255, 110, 170), "rotate": (120, 200, 255),
+              "count": (200, 255, 120)}
+TRIG_TITLE = {"move": "Move trigger", "reveal": "Reveal trigger", "light": "Light trigger",
+              "particle": "Particle trigger", "pulse": "Pulse trigger",
+              "rotate": "Rotate trigger", "count": "Count trigger"}
 
 TOP_BUTTONS = {            # name -> rect (top bar)
     "back": pygame.Rect(6, 5, 54, 30),
@@ -3624,6 +4139,38 @@ def trigger_fields(cfg):
         return [("group", "Group", "int", (1, GROUP_MAX, 1)),
                 ("show", "Action", "choice", [(True, "Reveal (appear)"),
                                               (False, "Hide (disappear)")])]
+    if t == "particle":
+        return [("color", "Colour (0 = mode colour, 1-10 = palette)", "int",
+                 (0, COLOR_SLOTS - 1, 1)),
+                ("count", "How many particles", "int", (1, 200, 5)),
+                ("spread", "Spread (blocks)", "float", (0.5, 10, 0.5)),
+                ("time", "Time (0 = one burst)", "float", (0, 10, 0.1)),
+                ("size", "Particle size", "int", (2, 14, 1)),
+                ("gravity", "Gravity (- = float up)", "float", (-1, 1, 0.05)),
+                ("at", "Comes from", "choice", [("trigger", "This trigger"),
+                                                ("player", "The player")])]
+    if t == "pulse":
+        return [("target", "Pulses", "choice", [("screen", "The whole screen"),
+                                                ("group", "A group")]),
+                ("group", "Group (when pulsing a group)", "int", (1, GROUP_MAX, 1)),
+                ("color", "Colour (palette 1-10)", "int", (1, COLOR_SLOTS - 1, 1)),
+                ("fade_in", "Fade in (seconds)", "float", (0, 10, 0.05)),
+                ("hold", "Hold (seconds)", "float", (0, 10, 0.05)),
+                ("fade_out", "Fade out (seconds)", "float", (0, 10, 0.05)),
+                ("strength", "Strength", "float", (0.05, 1, 0.05))]
+    if t == "rotate":
+        return [("group", "Group", "int", (1, GROUP_MAX, 1)),
+                ("degrees", "Degrees (+ = anticlockwise)", "float", (-3600, 3600, 15)),
+                ("center", "Around group (0 = its own middle)", "int", (0, GROUP_MAX, 1)),
+                ("time", "Time (seconds)", "float", (0, 10, 0.1)),
+                ("ease", "Easing", "choice", [(True, "Smooth"), (False, "Linear")])]
+    if t == "count":
+        return [("item", "Counter (item id)", "int", (1, COUNTER_MAX, 1)),
+                ("add", "Add to it (- takes away)", "int", (-100, 100, 1)),
+                ("target", "When it reaches", "int", (-999, 999, 1)),
+                ("group", "Group", "int", (1, GROUP_MAX, 1)),
+                ("show", "Then", "choice", [(True, "Reveal the group"),
+                                            (False, "Hide the group")])]
     return [("effect", "Effect", "choice", [(e, LIGHT_NAMES[e]) for e in LIGHT_EFFECTS]),
             ("radius", "Circle radius (blocks)", "float", (1, 12, 0.5)),
             ("time", "Time (seconds)", "float", (0, 10, 0.1))]
@@ -3635,6 +4182,7 @@ class Editor:
         self.data = data
         self.named = named
         self.cam = 0.0
+        self.camy = 0.0              # vertical scroll in pixels (0 = the floor is in view)
         self.tool = "block"
         self.layer = "main"          # "main" or "bg" (Edit Background mode)
         self.tab = {"main": 0, "bg": 0}
@@ -3701,8 +4249,16 @@ class Editor:
 
     def cell_at(self, x, y):
         col = int((x + self.cam) // B)
-        row = (FLOOR - 1 - y) // B
+        row = int((FLOOR - 1 - y + self.camy) // B)
         return col, row
+
+    def row_y(self, row):
+        """Screen y of the top of a row (with the vertical scroll)."""
+        return FLOOR - (row + 1) * B + self.camy
+
+    def clamp_cam(self):
+        self.cam = max(0.0, min(self.cam, MAX_COLS * B))
+        self.camy = max(0.0, min(self.camy, float((EDIT_ROWS - ROWS) * B)))
 
     def set_tool(self, tool):
         self.tool = tool
@@ -3721,7 +4277,7 @@ class Editor:
     # ---- editing -----------------------------------------------------------
     def place(self, col, row, first):
         d, tool = self.data, self.tool
-        if col < 0 or col >= MAX_COLS or not (0 <= row < ROWS):
+        if col < 0 or col >= MAX_COLS or not (0 <= row < EDIT_ROWS):
             return
         if tool == "erase":
             self.erase(col, row, first)
@@ -3837,7 +4393,7 @@ class Editor:
         out += [("text", c, r, v) for (c, r), v in d.texts.items() if self.in_sel(c, r)]
         out += [("trig", c, r, dict(v)) for (c, r), v in d.triggers.items()
                 if self.in_sel(c, r)]
-        whole = r0 == 0 and r1 == ROWS - 1      # column objects need the full height
+        whole = r0 == 0 and r1 >= ROWS - 1      # column objects need the full height
         if whole:
             out += [("grav", c, 0, v) for c, v in d.gravs.items() if c0 <= c <= c1]
             out += [("speed", c, 0, v) for c, v in d.speeds.items() if c0 <= c <= c1]
@@ -3892,7 +4448,7 @@ class Editor:
         n = 0
         for kind, dc, dr, v in self.clip["items"]:
             c, r = col + dc, row + dr
-            if not (0 <= r < ROWS and 0 <= c < MAX_COLS):
+            if not (0 <= r < EDIT_ROWS and 0 <= c < MAX_COLS):
                 continue
             v = copy.deepcopy(v)
             if kind in ("cell", "bg"):
@@ -3912,7 +4468,8 @@ class Editor:
             else:
                 continue
             n += 1
-        self.sel = (col, row, col + self.clip["w"] - 1, min(ROWS - 1, row + self.clip["h"] - 1))
+        self.sel = (col, row, col + self.clip["w"] - 1,
+                    min(EDIT_ROWS - 1, row + self.clip["h"] - 1))
         self.pasting = False
         self.dirty = True
         self.say("Pasted %d objects" % n)
@@ -4512,7 +5069,10 @@ class Editor:
             self.modal_event(e)
             return
         if e.type == pygame.MOUSEWHEEL:
-            self.cam += (e.x - e.y) * 80
+            if pygame.key.get_mods() & pygame.KMOD_SHIFT:     # Shift + wheel: up / down
+                self.camy += (e.y - e.x) * 80
+            else:
+                self.cam += (e.x - e.y) * 80
         elif e.type == pygame.MOUSEBUTTONDOWN and e.button in (1, 3):
             x, y = e.pos
             if y < CEIL:
@@ -4542,7 +5102,7 @@ class Editor:
             self.end_stroke()
         elif e.type == pygame.KEYDOWN:
             self.key(e)
-        self.cam = max(0.0, min(self.cam, MAX_COLS * B))
+        self.clamp_cam()
 
     def key(self, e):
         mods = e.mod                       # modifier state when the key was pressed
@@ -4574,7 +5134,7 @@ class Editor:
                 self.start_paste()
         elif cmd and k == pygame.K_a:
             self.tool = "select"
-            self.sel = (0, 0, max(self.data.last_col(), 1), ROWS - 1)
+            self.sel = (0, 0, max(self.data.last_col(), 1), max(ROWS - 1, self.data.top_row()))
         elif k in (pygame.K_DELETE, pygame.K_BACKSPACE):
             self.delete_key()
         elif k == pygame.K_e:
@@ -4597,7 +5157,11 @@ class Editor:
         elif k == pygame.K_p or k in (pygame.K_RETURN, pygame.K_KP_ENTER):
             self.playtest(here=bool(shift))
         elif k == pygame.K_HOME:
-            self.cam = 0.0
+            self.cam = self.camy = 0.0
+        elif k == pygame.K_PAGEUP:
+            self.camy += 5 * B
+        elif k == pygame.K_PAGEDOWN:
+            self.camy -= 5 * B
         elif pygame.K_1 <= k <= pygame.K_9:
             i = k - pygame.K_1
             row = self.cur_tab()[1 if shift else 0]
@@ -4853,7 +5417,11 @@ class Editor:
             self.cam -= speed
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
             self.cam += speed
-        self.cam = max(0.0, min(self.cam, MAX_COLS * B))
+        if keys[pygame.K_UP] or keys[pygame.K_w]:            # build higher (up to 108)
+            self.camy += speed
+        if keys[pygame.K_DOWN] or keys[pygame.K_s]:
+            self.camy -= speed
+        self.clamp_cam()
 
     # ---- drawing -------------------------------------------------------------
     def draw_button(self, rect, text, active=False, color=(120, 140, 220), font=None):
@@ -4895,6 +5463,19 @@ class Editor:
             elif sub == "reveal":
                 pygame.draw.ellipse(s, colr, (cx - 7, cy - 4, 14, 8), 2)
                 pygame.draw.circle(s, colr, (cx, cy), 2)
+            elif sub == "particle":
+                for ax, ay in ((-5, -4), (4, -5), (-3, 5), (5, 3), (0, 0)):
+                    pygame.draw.circle(s, colr, (cx + ax, cy + ay), 2)
+            elif sub == "pulse":
+                pygame.draw.circle(s, colr, (cx, cy), 3)
+                pygame.draw.circle(s, colr, (cx, cy), 7, 1)
+            elif sub == "rotate":
+                pygame.draw.arc(s, colr, (cx - 7, cy - 7, 14, 14), 0.3, 5.0, 2)
+                pygame.draw.polygon(s, colr, [(cx + 7, cy - 1), (cx + 3, cy - 6),
+                                              (cx + 10, cy - 6)])
+            elif sub == "count":
+                t = self.game.micro.render("+1", True, colr)
+                s.blit(t, (cx - t.get_width() // 2, cy - t.get_height() // 2))
             elif sub in ("flicker_on", "flicker_off"):
                 on = sub == "flicker_on"
                 pygame.draw.circle(s, colr if on else (90, 90, 70), (cx, cy - 2), 5)
@@ -4911,13 +5492,17 @@ class Editor:
         elif tool in GHOST_BASE:           # invisible variants: the icon plus a dashed box
             self.draw_icon(GHOST_BASE[tool], cx, cy)
             draw_dashed_rect(s, pygame.Rect(cx - 13, cy - 12, 26, 24), (255, 255, 255), 4, 3, 1)
-        elif tool == "pad":
-            pygame.draw.ellipse(s, (255, 230, 40), (cx - 12, cy + 2, 24, 10))
+        elif tool in UP_PADS:
+            pygame.draw.ellipse(s, PAD_ORB_COLOR[tool], (cx - 12, cy + 2, 24, 10))
         elif tool == "dpad":
             pygame.draw.ellipse(s, (80, 140, 255), (cx - 12, cy - 12, 24, 10))
-        elif tool in ("orb", "dorb"):
-            pygame.draw.circle(s, (255, 230, 40) if tool == "orb" else (80, 140, 255),
-                               (cx, cy), 7)
+        elif tool in DASH_ORBS:
+            pygame.draw.circle(s, PAD_ORB_COLOR[tool], (cx, cy), 7)
+            pygame.draw.circle(s, (255, 255, 255), (cx, cy), 12, 2)
+            pygame.draw.lines(s, (20, 20, 30), False, [(cx - 3, cy - 4), (cx + 2, cy),
+                                                       (cx - 3, cy + 4)], 2)
+        elif tool in ORBS:
+            pygame.draw.circle(s, PAD_ORB_COLOR[tool], (cx, cy), 7)
             pygame.draw.circle(s, (255, 255, 255), (cx, cy), 12, 2)
             d = 1 if tool == "dorb" else -1
             pygame.draw.polygon(s, (255, 255, 255),
@@ -4960,28 +5545,35 @@ class Editor:
         x = c * B - cam
         for yy in range(CEIL, FLOOR, 12):          # where it fires
             pygame.draw.line(s, tuple(v // 2 for v in colr), (x, yy), (x, yy + 5), 1)
-        cx, cy = int(x + B / 2), FLOOR - r * B - B // 2
+        cx, cy = int(x + B / 2), int(self.row_y(r) + B // 2)
         tool = "trig:" + t if t != "light" else "light:" + cfg["effect"]
         self.draw_icon(tool, cx, cy)
-        lab = "G%d" % cfg["group"] if t != "light" else ""
+        lab = ("I%d" % cfg["item"] if t == "count" else
+               "G%d" % cfg["group"] if "group" in cfg and not (
+                   t == "pulse" and cfg["target"] == "screen") else "")
         if lab:
             tt = g.tiny.render(lab, True, colr)
             s.blit(tt, (cx - tt.get_width() // 2, cy + 12))
 
+    def visible_rows(self):
+        return (int(self.camy // B) - 1, int((FLOOR - CEIL + self.camy) // B) + 1)
+
     def draw_layer(self, which, cam, acc, lo, hi):
         g = self.game
         d = self.data
+        rlo, rhi = self.visible_rows()
+        rlo -= 1                                    # (tall slopes start below the view)
         if which == "bg":
             for (c, r), (kind, flip, grp, colr) in d.bg.items():
-                if lo <= c <= hi:
+                if lo <= c <= hi and rlo <= r <= rhi:
                     g.draw_obj(Obj(kind, c, r, flip=flip, color=colr), cam, acc, layer="bg")
                     if self.layer == "bg":
-                        self.draw_group_tag(grp, c * B - cam, FLOOR - (r + 1) * B)
+                        self.draw_group_tag(grp, c * B - cam, self.row_y(r))
             return
         for (c, r), (kind, flip, grp, colr) in d.cells.items():
-            if lo <= c <= hi:
+            if lo <= c <= hi and rlo <= r <= rhi:
                 g.draw_obj(Obj(kind, c, r, flip=flip, color=colr), cam, acc)
-                self.draw_group_tag(grp, c * B - cam, FLOOR - (r + 1) * B)
+                self.draw_group_tag(grp, c * B - cam, self.row_y(r))
         for c, up in d.gravs.items():
             if lo <= c <= hi:
                 g.draw_obj(Obj("grav", c, 0, up=up), cam, acc)
@@ -4992,13 +5584,13 @@ class Editor:
             if lo <= c <= hi:
                 g.draw_mode_portal(mode, c * B - cam, CEIL + 36)
         for (c, r), (text, grp) in d.texts.items():
-            if lo - 6 <= c <= hi + 6:
+            if lo - 6 <= c <= hi + 6 and rlo <= r <= rhi:
                 g.draw_text_obj(TextObj(c, r, text), cam)
-                draw_dashed_rect(g.screen, pygame.Rect(int(c * B - cam), FLOOR - (r + 1) * B,
+                draw_dashed_rect(g.screen, pygame.Rect(int(c * B - cam), int(self.row_y(r)),
                                                       B, B), (200, 200, 255), 3, 3, 1)
-                self.draw_group_tag(grp, c * B - cam, FLOOR - (r + 1) * B)
+                self.draw_group_tag(grp, c * B - cam, self.row_y(r))
         for (c, r), cfg in d.triggers.items():
-            if lo <= c <= hi:
+            if lo <= c <= hi and rlo <= r <= rhi:
                 self.draw_trigger(c, r, cfg, cam)
 
     def draw(self):
@@ -5006,8 +5598,15 @@ class Editor:
         s = g.screen
         g.palette = self.data.palette
         cam = self.cam
+        camy = self.camy
+        g.camy = camy                     # world objects are drawn with the vertical scroll
+        g.view_ceil = CEIL - camy         # portals fill the visible area
         secs = self.sections()
         s.fill((10, 12, 30))
+        floor_s = FLOOR + camy
+        ceil_rows = ceil_rows_for(self.data.top_row(), self.data.top_row(anchor=True))
+        ceil_s = FLOOR - ceil_rows * B + camy          # where the ceiling will be in play
+        s.set_clip(pygame.Rect(0, CEIL, W, FLOOR - CEIL))
 
         # section backgrounds, floor / ceiling lines
         for i, (mode, c0) in enumerate(secs):
@@ -5016,21 +5615,34 @@ class Editor:
             if x1 < 0 or x0 > W:
                 continue
             x0, x1 = max(0, x0), min(W, x1)
-            pygame.draw.rect(s, BG[mode], (x0, CEIL, x1 - x0, FLOOR - CEIL))
-            pygame.draw.line(s, ACCENT[mode], (x0, CEIL), (x1, CEIL), 3)
-            pygame.draw.line(s, ACCENT[mode], (x0, FLOOR), (x1, FLOOR), 3)
+            top = max(CEIL, ceil_s)
+            pygame.draw.rect(s, tuple(int(v * 0.55) for v in BG[mode]),
+                             (x0, CEIL, x1 - x0, FLOOR - CEIL))
+            pygame.draw.rect(s, BG[mode], (x0, top, x1 - x0, max(0, floor_s - top)))
+            if CEIL <= ceil_s <= FLOOR:
+                pygame.draw.line(s, ACCENT[mode], (x0, ceil_s), (x1, ceil_s), 3)
+            pygame.draw.line(s, ACCENT[mode], (x0, floor_s), (x1, floor_s), 3)
 
         # grid
         first = int(cam // B)
         for ci in range(first, first + W // B + 2):
             x = ci * B - cam
             pygame.draw.line(s, (96, 106, 160) if ci % 10 == 0 else (52, 60, 104),
-                             (x, CEIL), (x, FLOOR), 1)
+                             (x, CEIL), (x, min(FLOOR, floor_s)), 1)
             if ci % 10 == 0:
                 s.blit(g.small.render(str(ci), True, (190, 200, 240)), (x + 3, CEIL + 3))
-        for r in range(ROWS + 1):
-            y = FLOOR - r * B
-            pygame.draw.line(s, (52, 60, 104), (0, y), (W, y), 1)
+        rlo, rhi = self.visible_rows()
+        for r in range(max(0, rlo), min(EDIT_ROWS, rhi) + 1):
+            y = FLOOR - r * B + camy
+            pygame.draw.line(s, (96, 106, 160) if r % 10 == 0 else (52, 60, 104), (0, y), (W, y), 1)
+            if r % 5 == 0 and r and CEIL + 14 < y:
+                rt = g.micro.render("row %d" % r, True, (150, 160, 210))
+                s.blit(rt, (W - rt.get_width() - 4, y + 2))
+        if CEIL <= ceil_s <= FLOOR:
+            ct = g.micro.render("CEILING (%d high) - 1 block above the highest object"
+                                % ceil_rows, True, (200, 205, 240))
+            s.blit(ct, (W // 2 - ct.get_width() // 2, ceil_s - 14 if ceil_s - 14 > CEIL else
+                        ceil_s + 4))
 
         # safe start zone + spawn marker
         sx1 = SAFE_COLS * B - cam
@@ -5039,7 +5651,7 @@ class Editor:
             dim.fill((0, 0, 0, 120))
             s.blit(dim, (0, CEIL))
             s.blit(g.small.render("START ZONE", True, (200, 200, 220)), (8 - cam, CEIL + 24))
-            pygame.draw.rect(s, PRIMARY, (3 * B - 18 - cam, FLOOR - 36, 36, 36), 2)
+            pygame.draw.rect(s, PRIMARY, (3 * B - 18 - cam, floor_s - 36, 36, 36), 2)
 
         acc = ACCENT[secs[0][0]]
         lo, hi = first - 1, first + W // B + 2
@@ -5067,7 +5679,7 @@ class Editor:
         # selection
         if self.sel:
             c0, r0, c1, r1 = self.sel_rect()
-            rect = pygame.Rect(int(c0 * B - cam), FLOOR - (r1 + 1) * B,
+            rect = pygame.Rect(int(c0 * B - cam), int(self.row_y(r1)),
                                (c1 - c0 + 1) * B, (r1 - r0 + 1) * B)
             veil = pygame.Surface(rect.size, pygame.SRCALPHA)
             veil.fill((255, 230, 90, 40))
@@ -5078,7 +5690,7 @@ class Editor:
         mx, my = pygame.mouse.get_pos()
         if CEIL <= my < FLOOR and not self.modal:
             col, row = self.cell_at(mx, my)
-            r = pygame.Rect(col * B - cam, FLOOR - (row + 1) * B, B, B)
+            r = pygame.Rect(col * B - cam, int(self.row_y(row)), B, B)
             tool = self.tool
             if self.pasting and self.clip:
                 ghost = pygame.Surface((W, H), pygame.SRCALPHA)
@@ -5103,7 +5715,7 @@ class Editor:
                     g.screen = s
                 ghost.set_alpha(150)
                 s.blit(ghost, (0, 0))
-                box = pygame.Rect(r.x, FLOOR - (row + self.clip["h"]) * B,
+                box = pygame.Rect(r.x, int(FLOOR - (row + self.clip["h"]) * B + camy),
                                   self.clip["w"] * B, self.clip["h"] * B)
                 draw_dashed_rect(s, box, (120, 255, 160), 7, 4, 2)
             elif tool in CELL_TOOLS:
@@ -5120,6 +5732,7 @@ class Editor:
             else:
                 pygame.draw.rect(s, (255, 255, 255), pygame.Rect(r.x, CEIL, B, FLOOR - CEIL), 2)
 
+        s.set_clip(None)
         if self.layer == "bg":
             t = g.font.render("EDIT BACKGROUND", True, (255, 230, 90))
             s.blit(t, (W - t.get_width() - 12, FLOOR - 28))
@@ -5182,9 +5795,11 @@ class Editor:
             if r.collidepoint((mx, my)) and name in TOOL_HELP:
                 hover_tool = name
         col = int((mx + self.cam) // B) if CEIL <= my < FLOOR else int(self.cam // B)
+        row = self.cell_at(mx, my)[1] if CEIL <= my < FLOOR else int(self.camy // B)
         nsel = len(self.selected()) if self.sel else 0
-        info = "col %d   objects %d%s" % (col, self.data.object_count(),
-                                          ("   selected %d" % nsel) if self.sel else "")
+        info = "col %d  row %d/%d   objects %d%s" % (
+            col, row + 1, EDIT_ROWS, self.data.object_count(),
+            ("   selected %d" % nsel) if self.sel else "")
         it = g.tiny.render(info, True, (190, 200, 240))
         s.blit(it, (W - it.get_width() - 10, FLOOR + 10))
         helptxt = TOOL_HELP.get(hover_tool)
@@ -5279,8 +5894,7 @@ class Editor:
         colr = TRIG_COLOR[cfg["type"]]
         pygame.draw.rect(s, (20, 24, 50), box, border_radius=12)
         pygame.draw.rect(s, colr, box, 3, border_radius=12)
-        title = {"move": "Move trigger", "reveal": "Reveal trigger",
-                 "light": "Light trigger"}[cfg["type"]]
+        title = TRIG_TITLE[cfg["type"]]
         s.blit(g.mid.render(title, True, (255, 255, 255)), (box.x + 24, box.y + 16))
         mx, my = pygame.mouse.get_pos()
         dr = self.props_delete_rect()
@@ -5335,6 +5949,9 @@ TAB_NAMES = ["Levels", "Your Levels", "Downloaded Levels", "All Levels", "Ranks"
 DOWNLOADED_TAB = 2
 RANKS_TAB = 4
 ONLINE_TAB = 5
+# sections inside the Online tab
+ONLINE_SECTIONS = [("browse", "BROWSE"), ("recent", "NEWEST 20"), ("search", "SEARCH")]
+RECENT_COUNT = 20
 CARD_H, CARD_GAP, CARD_TOP, CARD_X, CARD_W = 68, 8, 104, 50, 860
 HOME_BUTTONS = [("PLAY", (90, 230, 120)), ("BUILD LEVELS", (120, 200, 255)),
                 ("SKINS", (120, 255, 220)), ("SONGS", (255, 150, 230)),
@@ -5387,10 +6004,19 @@ class Game:
         self.tab = 0                       # level-select tab (see TAB_NAMES)
         self.tab_lists = [[] for _ in TAB_NAMES]
         self.online = {"status": "idle"}          # online levels (fetched in the background)
+        self.online_sec = "browse"                # Online tab section: browse / recent / search
+        self.online_query = ""                    # what's typed in the search box
+        self.online_typing = False                # typing in the search box right now
+        self.online_sel = {k: 0 for k, _ in ONLINE_SECTIONS}   # where you were in each one
+        self.play_from_online = False             # the level being played came from Online
         self.online_songs = {"status": "idle"}    # online music
         self.hardest = {"status": "idle"}          # curated hardest-levels list from GitHub
         self.hardest_applied = False
         self.start_hardest_fetch()                 # refresh the ranks in the background
+        self.repo_main = {"status": "loading"}     # main levels from the repo's main_levels/
+        self.repo_main_applied = False
+        threading.Thread(target=fetch_repo_main_levels, args=(self.repo_main,),
+                         daemon=True).start()
         self.move_old_downloads()
         self.other = []
         self.empty_lines = []
@@ -5419,14 +6045,19 @@ class Game:
         else:                                        # no online folder: no accounts
             self.accounts = {"users": {}, "current": None}
         self.account = None          # display name of the signed-in account (None = guest)
+        self.server_user = None      # the signed-in server account (SERVER_URL), if any
         self.acct = None             # the sign-in / sign-up form
         self.music_ok = None         # can we play sound at all? (decided on first use)
         self.music_on = None         # path of the song that is playing
         sk = self.save.get("__skins__")
         self.skins = dict(sk) if isinstance(sk, dict) else {}     # mode -> skin id
+        self.server_pull = None      # progress being fetched from the server
         cur = self.accounts.get("current")
         u = self.accounts["users"].get(cur) if cur else None
-        if u and u.get("salt") in self.known_salts.get(cur, {u.get("salt")}):
+        sess = saved_server_session() if SERVER_URL else None
+        if sess:
+            self.load_profile(sess)  # stay signed in to the server account
+        elif u and u.get("salt") in self.known_salts.get(cur, {u.get("salt")}):
             self.load_profile(u)     # stay signed in between sessions
         elif cur:
             store_current(None)      # not that account any more: sign in again
@@ -5439,6 +6070,9 @@ class Game:
         self.cave = None             # cached crystal cavern layers
         self.yard = None             # cached backyard layers
         self.palette = list(DEFAULT_PALETTE)   # colour slots of the level being drawn
+        self.camy = 0.0              # vertical camera: added to world y to get screen y
+        self.view_ceil = CEIL        # world y of the ceiling being drawn
+        self.tints = {}              # group -> (rgb, amount) from pulse triggers
         self.paused = False
         self.pause_sel = 0
         self.settings_return = "home"
@@ -5488,6 +6122,9 @@ class Game:
     # ---- accounts ----------------------------------------------------------------------
     def load_profile(self, user):
         """Switch progress (best %, coins, skins, unlocks) to an account, or to the guest."""
+        _sync.stop()
+        self.server_pull = None
+        self.server_user = user if (user and user.get("server")) else None
         if user:
             _save_target[0] = account_save_path(user, self.acc_root)
             try:
@@ -5503,8 +6140,46 @@ class Game:
             self.account = None
         sk = self.save.get("__skins__")
         self.skins = dict(sk) if isinstance(sk, dict) else {}
+        if user and user.get("server"):
+            _sync.start(user["token"])
+            self.server_pull = {"status": "loading"}      # get the server's copy
+            threading.Thread(target=self.pull_progress,
+                             args=(self.server_pull, user["token"]), daemon=True).start()
         if user:
             self.grant_verified(user)
+
+    @staticmethod
+    def pull_progress(out, token):
+        try:
+            reply = server_call("GET", "/api/progress", token=token)
+            out["progress"] = reply.get("progress") if isinstance(
+                reply.get("progress"), dict) else {}
+            out["status"] = "ok"
+        except ServerError as ex:
+            out["status"] = "denied" if ex.status == 401 else "error"
+
+    def server_sync_update(self):
+        """Called every frame: fold progress from the server into this computer's copy."""
+        pull = self.server_pull
+        if pull and pull["status"] != "loading":
+            self.server_pull = None
+            if pull["status"] == "ok" and self.server_user:
+                merge_progress(self.save, pull["progress"])
+                write_save(self.save)                   # (and send the merged copy back)
+                sk = self.save.get("__skins__")
+                self.skins = dict(sk) if isinstance(sk, dict) else self.skins
+                self.check_top1()
+            elif pull["status"] == "denied" and self.server_user:
+                self.sign_out()
+                self.say("Your sign-in ran out - please sign in again")
+        merged = _sync.merged
+        if merged is not None and self.server_user:
+            _sync.merged = None
+            before = json.dumps(self.save, sort_keys=True)
+            merge_progress(self.save, {k: v for k, v in merged.items() if k != "__skins__"})
+            if json.dumps(self.save, sort_keys=True) != before:   # (beaten on another PC)
+                write_json(_save_target[0], self.save)
+                self.check_top1()
 
     def grant_verified(self, user):
         """Give 100 percent on levels this account beat before they were added to the game."""
@@ -5556,10 +6231,22 @@ class Game:
         return out
 
     def load_main_levels(self):
-        """Main levels: level files in the main levels folder that have been set up."""
+        """Main levels: level files in the main levels folder that have been set up, and
+        the ones in the repo's main_levels/ folder."""
         meta = self.main_meta()
+        try:
+            with open(REPO_MAIN_META) as f:
+                repo_meta = json.load(f)
+        except Exception:
+            repo_meta = {}
         out = []
-        for data in load_custom_levels(MAIN_DIR):
+        local = load_custom_levels(MAIN_DIR)
+        have = {os.path.basename(d.path) for d in local}
+        sources = [(d, meta) for d in local] + [
+            (d, repo_meta if isinstance(repo_meta, dict) else {})
+            for d in load_custom_levels(REPO_MAIN_DIR)
+            if os.path.basename(d.path) not in have]
+        for data, meta in sources:
             fn = os.path.basename(data.path)
             info = meta.get(fn)
             if not isinstance(info, dict) or info.get("difficulty") not in MAIN_DIFFICULTIES:
@@ -5832,20 +6519,37 @@ class Game:
 
     def sign_in(self, user):
         self.load_profile(user)
-        self.accounts["current"] = account_key(user["name"])
-        store_current(self.accounts["current"])
+        if user.get("server"):
+            store_server_session(user)
+            self.accounts["current"] = None
+            store_current(None)
+        else:
+            self.accounts["current"] = account_key(user["name"])
+            store_current(self.accounts["current"])
         self.check_top1()
 
     def sign_out(self):
         name = self.account
+        user = self.server_user
         self.load_profile(None)
         self.accounts["current"] = None
         store_current(None)
+        if user:
+            store_server_session(None)
+            threading.Thread(target=lambda: self._quiet_logout(user["token"]),
+                             daemon=True).start()
         if name:
             self.say("Signed out of %s - playing as Guest" % name)
 
+    @staticmethod
+    def _quiet_logout(token):
+        try:
+            server_call("POST", "/api/logout", {}, token, timeout=5)
+        except ServerError:
+            pass
+
     def open_account(self, mode, back="home"):
-        if not self.acc_root:
+        if not self.acc_root and not SERVER_URL:
             self.say(self.NEED_ONLINE)
             return
         self.acct = {"mode": mode, "fields": ["", "", ""], "sel": 0, "err": "",
@@ -5870,6 +6574,34 @@ class Game:
     def account_submit(self):
         a = self.acct
         name, pw, pw2 = a["fields"]
+        if SERVER_URL:                  # accounts live on the Python Dash server
+            signup = a["mode"] == "signup"
+            if signup:
+                if pw != pw2:
+                    a["err"] = "The two passwords don't match"
+                    return
+                err = account_name_problem(name) or (
+                    "Passwords need at least %d characters" % PASSWORD_MIN
+                    if len(pw) < PASSWORD_MIN else None)
+                if err:
+                    a["err"] = err
+                    return
+            try:
+                reply = server_call("POST", "/api/signup" if signup else "/api/login",
+                                    {"name": " ".join(name.split()), "password": pw})
+            except ServerError as ex:
+                a["err"] = str(ex)
+                if not signup:
+                    a["fields"][1] = ""
+                return
+            user = {"name": str(reply.get("name") or name), "token": str(reply.get("token")),
+                    "server": True}
+            self.sign_in(user)
+            self.say(("Account created - welcome, %s!" if signup else "Welcome back, %s!")
+                     % user["name"]
+                     + ("  (Settings > Bring in Guest progress)" if self.guest_progress() else ""))
+            self.account_leave()
+            return
         if a["mode"] == "signup":
             if pw != pw2:
                 a["err"] = "The two passwords don't match"
@@ -6250,6 +6982,7 @@ class Game:
         if self.tab == ONLINE_TAB:
             self.fetch_online()
             items = self.online_items()
+            self.online_sel[self.online_sec] = max(0, min(sel, len(items) - 1))
         elif self.tab == RANKS_TAB:
             items = [self.rank_item(d) for d in self.levels]
         else:
@@ -6306,8 +7039,24 @@ class Game:
                    "idle": ("Loading levels from GitHub...", "")}[st]
             return [{"type": "online_msg", "name": msg[0], "sub": msg[1], "tag": "",
                      "col": (150, 160, 200), "modes": [], "best": None}]
+        levels = list(self.online["levels"])
+        sec = self.online_sec
+        if sec == "recent":                    # newest uploads first
+            levels = [lv for lv in levels if lv.get("uploaded")]
+            levels.sort(key=lambda lv: lv["uploaded"], reverse=True)
+            levels = levels[:RECENT_COUNT]
+        elif sec == "search":
+            q = self.online_query.strip().lower()
+            if not q:
+                return [{"type": "online_msg", "name": "Type to search the online levels",
+                         "sub": "Click the search box (or press F), then type a level name, "
+                                "a maker or a word from the description",
+                         "tag": "", "col": (150, 160, 200), "modes": [], "best": None}]
+            levels = [lv for lv in levels if q in lv["name"].lower()
+                      or q in (lv["author"] or "").lower()
+                      or q in (lv.get("description") or "").lower()]
         items = []
-        for lv in self.online["levels"]:
+        for lv in levels:
             have = os.path.isfile(os.path.join(OTHER_DIR, lv["file"]))
             title = lv["name"] + ((" by " + lv["author"]) if lv["author"] else "")
             items.append({"type": "online", "info": lv, "name": title,
@@ -6318,10 +7067,42 @@ class Game:
                           "col": (90, 230, 120) if have else (120, 200, 255),
                           "modes": [m for m in lv["modes"] if m in ACCENT], "best": None})
         if not items:
-            items = [{"type": "online_msg", "name": "No levels online yet",
-                      "sub": "github.com/%s - levels folder" % REPO, "tag": "",
+            msg = {"browse": ("No levels online yet", "github.com/%s - levels folder" % REPO),
+                   "recent": ("No new uploads yet",
+                              "Levels approved from the upload server show up here"),
+                   "search": ("Nothing matches \"%s\"" % self.online_query.strip(),
+                              "Try another name, maker or word")}[sec]
+            items = [{"type": "online_msg", "name": msg[0], "sub": msg[1], "tag": "",
                       "col": (150, 160, 200), "modes": [], "best": None}]
         return items
+
+    def set_online_sec(self, sec, typing=False):
+        """Switch the Online tab's section, back to where you were in it."""
+        if self.state == "select" and self.tab == ONLINE_TAB:
+            self.online_sel[self.online_sec] = self.sel
+        self.online_sec = sec
+        self.online_typing = typing and sec == "search"
+        self.go_select(self.online_sel.get(sec, 0), ONLINE_TAB)
+
+    def online_type_event(self, e):
+        """Keys while typing in the Online tab's search box."""
+        k = e.key
+        if k in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_TAB):
+            self.online_typing = False
+            return
+        if k == pygame.K_BACKSPACE:
+            self.online_query = self.online_query[:-1]
+        elif k in (pygame.K_UP, pygame.K_DOWN):
+            self.online_typing = False
+            return
+        elif (e.mod & (pygame.KMOD_CTRL | pygame.KMOD_META)) and k == pygame.K_v:
+            self.online_query = (self.online_query + self.clipboard_text())[:40]
+        elif e.unicode and e.unicode.isprintable() and len(self.online_query) < 40:
+            self.online_query += e.unicode
+        else:
+            return
+        self.online_sel["search"] = 0
+        self.go_select(0, ONLINE_TAB)
 
     def online_activate(self, i):
         it = self.items[i]
@@ -6346,11 +7127,18 @@ class Game:
             self.say(msg + "  (ENTER to play)")
             self.go_select(i, ONLINE_TAB)
             return
-        for k, d in enumerate(self.tab_lists[DOWNLOADED_TAB]):     # play it
-            if d.path and os.path.basename(d.path) == lv["file"]:
-                self.go_select(k, DOWNLOADED_TAB)
-                self.start_level(k)
-                return
+        # Play it straight from here: leaving the level comes back to this same spot
+        # in the Online tab (the section, search and level you had picked).
+        try:
+            with open(dest) as f:
+                data = LevelData.from_json(json.load(f))
+        except Exception:
+            self.say("Couldn't open the level - press R to refresh and download it again")
+            return
+        data.path = dest
+        self.online_sel[self.online_sec] = i
+        self.levels = [custom_def(data, "OTHER")]       # same progress as Downloaded tab
+        self.start_level(0, from_online=True)
 
     def fetch_level_song(self, song):
         try:
@@ -6464,6 +7252,9 @@ class Game:
         it = self.items[self.sel]
         if it.get("type") != "custom" or not it.get("path"):
             return
+        if SERVER_URL:
+            self.upload_to_server(it)
+            return
         if not SUBMIT_DIR:
             self.say("Uploading needs the game to be run from a shared online folder")
             return
@@ -6482,6 +7273,30 @@ class Game:
             self.say("Couldn't upload the level")
             return
         self.say("Uploaded \"%s\" - an admin will review it before it's added" % data.name)
+
+    def upload_to_server(self, it):
+        """Send a level to the Python Dash server.  It waits there until AXO or
+        AugmentedMagic look at it; the ones they approve are put in the GitHub repo."""
+        if not self.server_user:
+            self.say("Sign in first so your upload is sent under your name")
+            return
+        try:
+            data = it["data"]
+            data.author = self.account
+            j = data.to_json(embed_music=True)            # the song goes with it
+        except OSError:
+            self.say("Couldn't read the level")
+            return
+        token = self.server_user["token"]
+        self.say("Uploading \"%s\"..." % data.name)
+
+        def send():
+            try:
+                server_call("POST", "/api/levels/submit", {"level": j}, token, timeout=120)
+                self.say("Uploaded \"%s\" - AXO or AugmentedMagic will review it" % data.name)
+            except ServerError as ex:
+                self.say("Upload failed: %s" % ex)
+        threading.Thread(target=send, daemon=True).start()
 
     def card_buttons(self, slot):
         r = self.card_rect(slot)
@@ -6631,7 +7446,8 @@ class Game:
         self.accent = list(ACCENT[first])
         self.input_lock = True          # ignore the key that started the level
 
-    def start_level(self, idx):
+    def start_level(self, idx, from_online=False):
+        self.play_from_online = from_online
         self.level_idx = idx
         self.practice = self.settings["default_practice"]
         self.playtest = False
@@ -6659,6 +7475,10 @@ class Game:
         self.stop_music()
         if self.playtest:
             self.state = "editor"
+        elif self.play_from_online:           # back to the Online tab, where you were
+            self.play_from_online = False
+            self.online_typing = False
+            self.go_select(self.online_sel.get(self.online_sec, 0), ONLINE_TAB)
         else:
             self.go_select(self.level_idx)
 
@@ -6675,6 +7495,7 @@ class Game:
         if self.practice:          # practice keeps the coins you got before the checkpoint
             p.coins = frozenset(k for k in kept if k[0] * B < p.x)
         self.level.reset_runtime(p.x)
+        self.follow_camera(snap=True)
         self.start_level_music()
 
     # ---- music ----------------------------------------------------------------------
@@ -6747,6 +7568,20 @@ class Game:
         except Exception:
             pass
         return ""
+
+    def follow_camera(self, snap=False):
+        """Tall levels: the view slides up and down to keep the player on screen.  A
+        level whose ceiling fits on screen never moves (camy stays 0)."""
+        lv = self.level
+        top = max(0.0, CEIL - lv.ceil_y)              # how far up the view can go
+        if top <= 0:
+            self.camy = 0.0
+            return
+        target = max(0.0, min(top, H * 0.48 - self.player.y))
+        if snap:
+            self.camy = target
+        else:
+            self.camy += (target - self.camy) * 0.18
 
     def respawn(self):
         self.attempt += 1
@@ -6912,7 +7747,9 @@ class Game:
 
     def card_geom(self):
         """(top, card height, gap): the level-select screen has a tab bar above its cards."""
-        return (134, 64, 4) if self.state == "select" else (CARD_TOP, CARD_H, CARD_GAP)
+        if self.state == "select":
+            return (166, 64, 4) if self.tab == ONLINE_TAB else (134, 64, 4)
+        return (CARD_TOP, CARD_H, CARD_GAP)
 
     def card_rect(self, slot):
         top, h, gap = self.card_geom()
@@ -6928,6 +7765,13 @@ class Game:
     def tab_rect(self, i):
         w = (W - 100) // len(TAB_NAMES)
         return pygame.Rect(50 + i * w, 98, w - 6, 28)
+
+    @staticmethod
+    def online_sec_rect(i):
+        """The Online tab's section buttons (BROWSE, NEWEST 20) and the search box."""
+        if i < 2:
+            return pygame.Rect(50 + i * 150, 132, 144, 28)
+        return pygame.Rect(350, 132, W - 400, 28)
 
     def migrate_accounts(self):
         """Copy accounts made before accounts went online (on this computer, or in a folder
@@ -6971,6 +7815,21 @@ class Game:
 
     def list_event(self, e):
         n = len(self.items)
+        online = self.state == "select" and self.tab == ONLINE_TAB
+        if online and self.online_typing and e.type == pygame.KEYDOWN:
+            self.online_type_event(e)
+            return
+        if online and e.type == pygame.KEYDOWN and e.key in (pygame.K_b, pygame.K_n,
+                                                             pygame.K_f, pygame.K_SLASH):
+            self.set_online_sec({pygame.K_b: "browse", pygame.K_n: "recent"}.get(
+                e.key, "search"), typing=e.key in (pygame.K_f, pygame.K_SLASH))
+            return
+        if online and e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            for i, (key, _) in enumerate(ONLINE_SECTIONS):
+                if self.online_sec_rect(i).collidepoint(e.pos):
+                    self.set_online_sec(key, typing=key == "search")
+                    return
+            self.online_typing = False
         if e.type == pygame.KEYDOWN:
             k = e.key
             if k in (pygame.K_DELETE, pygame.K_BACKSPACE):
@@ -7002,7 +7861,7 @@ class Game:
                     self.list_activate(self.sel)
                 elif sel_state and self.tab == ONLINE_TAB and k == pygame.K_r:
                     self.fetch_online(force=True)
-                    self.go_select(0, ONLINE_TAB)
+                    self.go_select(self.sel, ONLINE_TAB)
                 elif sel_state and self.tab == ONLINE_TAB:
                     pass
                 elif sel_state and pygame.K_1 <= k <= pygame.K_9 and k - pygame.K_1 < n:
@@ -7175,6 +8034,7 @@ class Game:
     # ---- update -------------------------------------------------------------------
     def update(self):
         self.menu_t += 1
+        self.server_sync_update()
         if self.hardest["status"] == "ok" and not self.hardest_applied:
             self.hardest_applied = True
             if set_ranks(self.hardest.get("ranks", [])):
@@ -7186,6 +8046,11 @@ class Game:
                 and self.online["status"] in ("ok", "error")
                 and self.items[0].get("name") != self.online_items()[0].get("name")):
             self.go_select(self.sel, ONLINE_TAB)
+        if self.repo_main["status"] == "ok" and not self.repo_main_applied:
+            self.repo_main_applied = True     # new main levels from the repo arrived
+            self._mode_cache.clear()
+            if self.state == "select" and self.tab != ONLINE_TAB:
+                self.go_select(self.sel)
         if self.toast_t > 0:
             self.toast_t -= 1
         if self.state == "admin":             # notice files dropped into the folder
@@ -7200,7 +8065,7 @@ class Game:
         for pt in self.particles:
             pt[0] += pt[2]
             pt[1] += pt[3]
-            pt[3] += 0.4
+            pt[3] += pt[6] if len(pt) > 6 else 0.4
             pt[4] -= 1
         self.particles = [pt for pt in self.particles if pt[4] > 0]
         if self.finished:
@@ -7213,8 +8078,22 @@ class Game:
             return
         if self.noclip:
             self.assisted = True            # any noclip use taints the attempt
-        self.level.update(p.x)
+        self.level.update(p.x, p.y)
+        if self.level.spawned:                    # particle triggers
+            acc = self.col(self.accent)
+            for ex, ey, cfg in self.level.spawned:
+                colr = slot_color(self.palette, cfg["color"], acc)
+                ang = random.uniform(0, math.tau)
+                spd = random.uniform(0.3, 1.0) * cfg["spread"] * B / 30.0
+                self.particles.append([ex + random.uniform(-6, 6), ey + random.uniform(-6, 6),
+                                       math.cos(ang) * spd, math.sin(ang) * spd,
+                                       random.randint(30, 60), colr, cfg["gravity"],
+                                       cfg["size"]])
+            self.level.spawned = []
+            if len(self.particles) > 1500:
+                del self.particles[:len(self.particles) - 1500]
         p.step(self.is_held(), self)
+        self.follow_camera()
         if p.alive and p.x >= self.level.end_col * B:
             self.finished = True
             if not self.practice:
@@ -7247,8 +8126,8 @@ class Game:
     def draw_mode_portal(self, mode, x, label_y):
         s = self.screen
         if -60 < x < W + 60:
-            r = pygame.Rect(0, 0, 30, FLOOR - CEIL)
-            r.midtop = (int(x), CEIL)
+            r = pygame.Rect(0, 0, 30, FLOOR - self.view_ceil)
+            r.midtop = (int(x), int(self.view_ceil + self.camy))
             pygame.draw.ellipse(s, ACCENT[mode], r, 5)
             pygame.draw.ellipse(s, BG[mode], r.inflate(-12, -24))
             txt = self.small.render("MINI WAVE" if mode == "miniwave" else mode.upper(),
@@ -7306,7 +8185,8 @@ class Game:
             tt = self.font.render(label, True, colr)
             s.blit(tt, (r.centerx - tt.get_width() // 2, r.centery - tt.get_height() // 2))
         who = ("Signed in as " + self.account) if self.account else (
-            "Playing as Guest" if self.acc_root else "Guest - accounts need an online folder")
+            "Playing as Guest" if (self.acc_root or SERVER_URL)
+            else "Guest - accounts need an online folder")
         wt = self.small.render(who, True, (190, 200, 235))
         last = max(r.right for r in self.account_buttons().values())
         s.blit(wt, (last + 12, 16))
@@ -7334,6 +8214,30 @@ class Game:
             t = f.render(label, True, col)
             s.blit(t, (r.centerx - t.get_width() // 2, r.centery - t.get_height() // 2))
 
+    def draw_online_sections(self):
+        s = self.screen
+        mx, my = pygame.mouse.get_pos()
+        for i, (key, label) in enumerate(ONLINE_SECTIONS):
+            r = self.online_sec_rect(i)
+            on = key == self.online_sec
+            hov = r.collidepoint((mx, my))
+            pygame.draw.rect(s, (40, 46, 90) if (on or hov) else (16, 19, 42), r,
+                             border_radius=8)
+            pygame.draw.rect(s, (120, 230, 255) if on else (60, 68, 120), r, 2,
+                             border_radius=8)
+            if key == "search":
+                q = self.online_query
+                caret = "|" if self.online_typing and (pygame.time.get_ticks() // 450) % 2 \
+                    == 0 else ""
+                text = ("SEARCH:  " + q + caret) if (q or self.online_typing) else \
+                    "SEARCH  (click or press F, then type)"
+                colr = (255, 255, 255) if (q or self.online_typing) else (160, 170, 210)
+            else:
+                text, colr = label, (255, 255, 255) if on else (160, 170, 210)
+            t = self.small.render(text, True, colr)
+            x = r.x + 12 if key == "search" else r.centerx - t.get_width() // 2
+            s.blit(t, (x, r.centery - t.get_height() // 2))
+
     def draw_list(self, title, subtitle, hint):
         s = self.screen
         self.draw_menu_bg()
@@ -7343,6 +8247,8 @@ class Game:
         s.blit(sub, (W // 2 - sub.get_width() // 2, 78))
         if self.state == "select":
             self.draw_tabs()
+            if self.tab == ONLINE_TAB:
+                self.draw_online_sections()
         top, ch, gap = self.card_geom()
 
         for slot in range(VISIBLE_CARDS):
@@ -7435,6 +8341,8 @@ class Game:
     # ---- drawing: gameplay -----------------------------------------------------------
     def draw(self):
         st = self.state
+        if st != "play":                  # menus are drawn without the level camera
+            self.camy, self.view_ceil, self.tints = 0.0, CEIL, {}
         if st == "home":
             self.draw_home()
             return
@@ -7446,8 +8354,8 @@ class Game:
         if st == "select":
             if self.tab == ONLINE_TAB:
                 self.draw_list("SELECT A LEVEL", "online levels from github.com/" + REPO,
-                               "LEFT/RIGHT: tab   UP/DOWN: choose   ENTER: download / play   "
-                               "R: refresh   ESC: back")
+                               "B: browse   N: newest   F: search   UP/DOWN: choose   "
+                               "ENTER: download / play   R: refresh   ESC: back")
             else:
                 self.draw_list("SELECT A LEVEL", "built-in levels, levels you built, and levels "
                                "you downloaded",
@@ -7487,6 +8395,10 @@ class Game:
         s = self.screen
         p = self.player
         cam = p.x - CAM_OFFSET
+        lv = self.level
+        camy = self.camy
+        self.view_ceil = lv.ceil_y
+        self.tints = lv.group_tints() if lv.pulses else {}
 
         tb, ta = BG[p.mode], ACCENT[p.mode]
         for i in range(3):
@@ -7514,40 +8426,50 @@ class Game:
                 break                          # themes draw their own scenery
             x = int(i * 80 - off)
             pygame.draw.line(s, grid, (x, 0), (x, FLOOR), 1)
-        for y in range(0, FLOOR, 80):
+        yoff = (camy * 0.4) % 80
+        for i in range(-1, H // 80 + 2):
             if self.level.theme:
                 break
+            y = int(i * 80 + yoff)
             pygame.draw.line(s, grid, (0, y), (W, y), 1)
 
-        # ceiling (every mode has one)
+        # ceiling (every mode has one: one block above the highest object)
         secs = self.level.sections
-        lv = self.level
-        pygame.draw.rect(s, (8, 8, 20), (0, 0, W, CEIL))
-        pygame.draw.line(s, acc, (0, CEIL), (W, CEIL), 3)
+        ceil_s = int(lv.ceil_y + camy)
+        if ceil_s > 0:
+            pygame.draw.rect(s, (8, 8, 20), (0, 0, W, ceil_s))
+        if ceil_s > -4:
+            pygame.draw.line(s, acc, (0, ceil_s), (W, ceil_s), 3)
+
+        # rows on screen (tall levels: only draw what can be seen)
+        r_lo = int((camy - (H - FLOOR)) // B) - 2
+        r_hi = int((FLOOR + camy) // B) + 2
 
         # background layer (decoration - drawn behind everything, never collides)
         c0 = int(cam // B) - 1
         c1 = c0 + W // B + 3
         for c in range(c0, c1):
             for o in lv.bg_cols.get(c, ()):
-                if not o.hidden:
+                if not o.hidden and r_lo <= o.row <= r_hi:
                     self.draw_obj(o, cam, acc, layer="bg")
         for o in lv.bg_dyn:
             if not o.hidden and -B < o.rect.x - cam < W + B:
                 self.draw_obj(o, cam, acc, layer="bg")
 
         # ground
-        pygame.draw.rect(s, (8, 8, 20), (0, FLOOR, W, H - FLOOR))
-        pygame.draw.line(s, acc, (0, FLOOR), (W, FLOOR), 3)
-        goff = cam % B
-        for i in range(W // B + 2):
-            x = int(i * B - goff)
-            pygame.draw.line(s, (22, 22, 44), (x, FLOOR + 3), (x, H), 1)
+        floor_s = int(FLOOR + camy)
+        if floor_s < H:
+            pygame.draw.rect(s, (8, 8, 20), (0, floor_s, W, H - floor_s))
+            pygame.draw.line(s, acc, (0, floor_s), (W, floor_s), 3)
+            goff = cam % B
+            for i in range(W // B + 2):
+                x = int(i * B - goff)
+                pygame.draw.line(s, (22, 22, 44), (x, floor_s + 3), (x, H), 1)
 
         # level objects
         for c in range(c0, c1):
             for o in lv.cols.get(c, ()):
-                if not o.hidden:
+                if not o.hidden and (r_lo <= o.row <= r_hi or o.kind in ("grav", "speed")):
                     self.draw_obj(o, cam, acc)
         for o in lv.dyn:
             if not o.hidden and -B < o.rect.x - cam < W + B:
@@ -7558,19 +8480,20 @@ class Game:
 
         # mode portals + labels
         for mode, col in secs[1:]:
-            self.draw_mode_portal(mode, col * B - cam, FLOOR + 14)
+            self.draw_mode_portal(mode, col * B - cam, min(H - 24, floor_s + 14))
 
         # finish line
         fx = self.level.end_col * B - cam
         if -40 < fx < W:
-            for i in range(0, FLOOR, 20):
+            top = max(0, ceil_s) - (max(0, ceil_s) - ceil_s) % 20
+            for i in range(top, min(floor_s, H), 20):
                 for j in range(2):
-                    colr = (255, 255, 255) if (i // 20 + j) % 2 == 0 else (30, 30, 30)
+                    colr = (255, 255, 255) if ((i - ceil_s) // 20 + j) % 2 == 0 else (30, 30, 30)
                     pygame.draw.rect(s, colr, (fx + j * 20, i, 20, 20))
 
         # wave trail
         if len(p.trail) >= 2:
-            pts = [(tx - cam, ty) for tx, ty in p.trail]
+            pts = [(tx - cam, ty + camy) for tx, ty in p.trail]
             pygame.draw.lines(s, (20, 20, 40), False, pts, 8)
             pygame.draw.lines(s, self.skin_for("wave")["b"], False, pts, 4)
 
@@ -7584,17 +8507,25 @@ class Game:
             ang = p.angle()
             if abs(ang) > 0.01:
                 spr = pygame.transform.rotozoom(spr, ang, 1.0)
-            s.blit(spr, spr.get_rect(center=(int(p.x - cam), int(p.y))))
+            s.blit(spr, spr.get_rect(center=(int(p.x - cam), int(p.y + camy))))
             if self.show_hitboxes:
-                r = p.rect().move(-int(cam), 0)
+                r = p.rect().move(-int(cam), int(camy))
                 pygame.draw.rect(s, (0, 255, 0), r, 1)
 
         # particles
-        for x, y, _, _, life, colr in self.particles:
-            sz = max(2, life // 6)
-            pygame.draw.rect(s, colr, (x - cam - sz / 2, y - sz / 2, sz, sz))
+        for pt in self.particles:
+            x, y, life, colr = pt[0], pt[1], pt[4], pt[5]
+            sz = pt[7] if len(pt) > 7 and pt[7] else max(2, life // 6)
+            pygame.draw.rect(s, colr, (x - cam - sz / 2, y + camy - sz / 2, sz, sz))
 
-        self.draw_light(p.x - cam, p.y)
+        # pulse trigger: the whole screen flashes a colour
+        sp = lv.screen_pulse() if lv.pulses else None
+        if sp and sp[1] > 0.01:
+            veil = pygame.Surface((W, H), pygame.SRCALPHA)
+            veil.fill(tuple(sp[0]) + (int(200 * sp[1]),))
+            s.blit(veil, (0, 0))
+
+        self.draw_light(p.x - cam, p.y + camy)
         self.draw_hud(acc)
         if self.paused:
             self.draw_pause()
@@ -8127,7 +9058,7 @@ class Game:
     def draw_text_obj(self, t, cam):
         s = self.screen
         cx = t.col * B + t.ox - cam + B / 2
-        cy = FLOOR - (t.row + 1) * B + t.oy + B / 2
+        cy = FLOOR - (t.row + 1) * B + t.oy + B / 2 + self.camy
         img = self.font.render(t.text, True, (255, 255, 255))
         sh = self.font.render(t.text, True, (0, 0, 0))
         x, y = int(cx - img.get_width() / 2), int(cy - img.get_height() / 2)
@@ -8161,7 +9092,7 @@ class Game:
         old = self.palette
         self.palette = [rgb] * len(DEFAULT_PALETTE)
         o = Obj(kind, 0, 0, color=1)
-        o.oy = y - (FLOOR - B)                         # row 0 normally sits on the floor
+        o.oy = y - (FLOOR - B) - self.camy             # row 0 normally sits on the floor
         try:
             self.draw_obj(o, -x, (255, 255, 255))
         finally:
@@ -8170,35 +9101,68 @@ class Game:
     def draw_obj(self, o, cam, acc, layer="main"):
         s = self.screen
         sx = o.col * B + o.ox - cam
-        sy = int(FLOOR - (o.row + 1) * B + o.oy)
-        k = o.kind
-        ghost = o.flip and k in ("pad", "dpad", "orb", "dorb")      # an invisible object
+        sy = int(FLOOR - (o.row + 1) * B + o.oy + self.camy)
+        k = o.kind if not o.ang else o.base_kind      # (rotated: drawn turned, below)
+        ghost = o.flip and k in PADS + ORBS                 # an invisible object
         if ghost and self.state != "editor":
             k = None          # never drawn while playing (hitboxes mode still shows it)
+        tint = self.tints.get(o.group) if (o.group and self.state == "play") else None
+        ang = o.ang
+
+        def turned(pts):
+            """Polygon points turned by the object's rotate-trigger angle."""
+            if not ang:
+                return pts
+            if k in RAMPS:
+                w, h = ramp_size(k)
+                cx, cy = sx + w * B / 2, sy - (h - 1) * B + h * B / 2
+            else:
+                cx, cy = sx + B / 2, sy + B / 2
+            a = math.radians(ang)
+            ca, sa = math.cos(a), math.sin(a)
+            return [(cx + (x - cx) * ca + (y - cy) * sa, cy - (x - cx) * sa + (y - cy) * ca)
+                    for x, y in pts]
+
+        def box():
+            return [(sx, sy), (sx + B, sy), (sx + B, sy + B), (sx, sy + B)]
+
         if layer == "bg":     # background layer: soft, outline-free decoration
             fill = bg_fill(acc, o.color, self.palette)
+            if tint:
+                fill = mix(fill, tint[0], tint[1])
             if k == "block":
-                pygame.draw.rect(s, fill, (int(sx), sy, B, B))
+                if ang:
+                    pygame.draw.polygon(s, fill, turned(box()))
+                else:
+                    pygame.draw.rect(s, fill, (int(sx), sy, B, B))
             elif k in SPIKES:
-                pygame.draw.polygon(s, fill, spike_points(k, sx, sy, o.flip))
+                pygame.draw.polygon(s, fill, turned(spike_points(k, sx, sy, o.flip)))
             elif k in RAMPS:
                 w, h = ramp_size(k)
-                pygame.draw.polygon(s, fill, ramp_points(k, int(sx), sy - (h - 1) * B,
-                                                         w * B, h * B))
+                pygame.draw.polygon(s, fill, turned(ramp_points(k, int(sx), sy - (h - 1) * B,
+                                                                w * B, h * B)))
             return
         if o.color and k in COLORABLE:                 # an object with its own colour
             line = slot_color(self.palette, o.color, acc)
             fillc = tuple(int(v * 0.18) + 8 for v in line)
         else:
             line, fillc = acc, (12, 14, 32)
+        if tint:
+            line = mix(line, tint[0], tint[1])
+            fillc = mix(fillc, tint[0], tint[1] * 0.6)
         if k == "block":
-            r = pygame.Rect(int(sx), sy, B, B)
-            pygame.draw.rect(s, fillc, r)
-            pygame.draw.rect(s, line, r, 2)
-            pygame.draw.rect(s, tuple(v // 2 for v in line), r.inflate(-16, -16), 1)
+            if ang:
+                pts = turned(box())
+                pygame.draw.polygon(s, fillc, pts)
+                pygame.draw.polygon(s, line, pts, 2)
+            else:
+                r = pygame.Rect(int(sx), sy, B, B)
+                pygame.draw.rect(s, fillc, r)
+                pygame.draw.rect(s, line, r, 2)
+                pygame.draw.rect(s, tuple(v // 2 for v in line), r.inflate(-16, -16), 1)
         elif k in RAMPS:
             w, h = ramp_size(k)
-            pts = ramp_points(k, int(sx), sy - (h - 1) * B, w * B, h * B)
+            pts = turned(ramp_points(k, int(sx), sy - (h - 1) * B, w * B, h * B))
             pygame.draw.polygon(s, fillc, pts)
             pygame.draw.polygon(s, line, pts, 2)
         elif k == "coin":
@@ -8213,60 +9177,63 @@ class Game:
                     pygame.draw.ellipse(s, (200, 140, 20),
                                         (cx - wd // 4, cy - 7, max(2, wd // 2), 14), 2)
         elif k in SPIKES:
-            pts = spike_points(k, sx, sy, o.flip)
-            colored = o.color and line is not acc
+            pts = turned(spike_points(k, sx, sy, o.flip))
+            colored = (o.color and line is not acc) or tint
             pygame.draw.polygon(s, fillc if colored else (6, 6, 14), pts)
             pygame.draw.polygon(s, line if colored else (255, 255, 255), pts, 2)
-        elif k == "pad":
-            pygame.draw.ellipse(s, (255, 230, 40), (sx + 3, sy + B - 12, B - 6, 14))
+        elif k in UP_PADS:
+            colr = PAD_ORB_COLOR[k]
+            pygame.draw.ellipse(s, colr, (sx + 3, sy + B - 12, B - 6, 14))
             pygame.draw.ellipse(s, (255, 255, 255), (sx + 3, sy + B - 12, B - 6, 14), 2)
         elif k == "dpad":
             pygame.draw.ellipse(s, (80, 140, 255), (sx + 3, sy - 2, B - 6, 14))
             pygame.draw.ellipse(s, (255, 255, 255), (sx + 3, sy - 2, B - 6, 14), 2)
-        elif k in ("orb", "dorb"):
+        elif k in ORBS:
             cx, cy = int(sx + B / 2), sy + B // 2
             used = (o.col, o.row) in self.player.used_orbs and self.state == "play"
             pulse = 17 + int(2 * math.sin(pygame.time.get_ticks() * 0.01))
-            if k == "orb":
-                col = (120, 120, 60) if used else (255, 230, 40)
-            else:
-                col = (50, 70, 120) if used else (80, 140, 255)
+            col = PAD_ORB_COLOR[k]
+            if used:
+                col = tuple(v // 2 for v in col)
+            white = (255, 255, 255) if not used else (140, 140, 140)
             pygame.draw.circle(s, col, (cx, cy), 11)
-            pygame.draw.circle(s, (255, 255, 255) if not used else (140, 140, 140),
-                               (cx, cy), pulse, 2)
-            d = 1 if k == "dorb" else -1          # arrow shows the bounce direction
-            pygame.draw.polygon(s, (255, 255, 255) if not used else (140, 140, 140),
-                                [(cx - 5, cy - 3 * d), (cx + 5, cy - 3 * d), (cx, cy + 4 * d)])
-        elif k == "speed":
-            colr = SPEED_COLOR.get(o.val, (255, 255, 255))
-            r = pygame.Rect(0, 0, 26, FLOOR - CEIL)
-            r.midtop = (int(sx + B / 2), CEIL)
-            pygame.draw.ellipse(s, colr, r, 4)
-            cx, cy = r.centerx, (FLOOR + CEIL) // 2
-            n = max(1, SPEED_VALUES.index(o.val) if o.val in SPEED_VALUES else 1)
-            step = max(5, min(10, 20 // n))        # more chevrons = faster
-            for i in range(n):
-                x0 = cx - 3 - (n - 1) * step // 2 + i * step
-                pygame.draw.lines(s, colr, False, [(x0, cy - 8), (x0 + 5, cy), (x0, cy + 8)], 2)
-            lab = self.small.render("%gx" % o.val, True, colr)
-            lr = pygame.Rect(0, 0, lab.get_width() + 8, lab.get_height() + 4)
-            lr.midtop = (cx, CEIL + 6)
-            pygame.draw.rect(s, (8, 8, 20), lr, border_radius=4)
-            s.blit(lab, (lr.x + 4, lr.y + 2))
-        elif k == "grav":
-            colr = (255, 225, 30) if o.up else (60, 170, 255)
-            r = pygame.Rect(0, 0, 26, FLOOR - CEIL)
-            r.midtop = (int(sx + B / 2), CEIL)
-            pygame.draw.ellipse(s, colr, r, 4)
-            cy = (FLOOR + CEIL) // 2
-            d = -1 if o.up else 1
-            cx = r.centerx
-            pygame.draw.polygon(s, colr, [(cx - 8, cy - 8 * d), (cx + 8, cy - 8 * d),
-                                          (cx, cy + 10 * d)])
+            pygame.draw.circle(s, white, (cx, cy), pulse, 2)
+            if k in DASH_ORBS:                     # a chevron: straight ahead
+                pygame.draw.lines(s, (20, 20, 30), False,
+                                  [(cx - 4, cy - 6), (cx + 3, cy), (cx - 4, cy + 6)], 3)
+            else:
+                d = 1 if k == "dorb" else -1          # arrow shows the bounce direction
+                pygame.draw.polygon(s, white, [(cx - 5, cy - 3 * d), (cx + 5, cy - 3 * d),
+                                               (cx, cy + 4 * d)])
+        elif k in ("speed", "grav"):
+            top = int(self.view_ceil + self.camy)
+            r = pygame.Rect(0, 0, 26, FLOOR - self.view_ceil)
+            r.midtop = (int(sx + B / 2), top)
+            cx, cy = r.centerx, r.centery
+            if k == "speed":
+                colr = SPEED_COLOR.get(o.val, (255, 255, 255))
+                pygame.draw.ellipse(s, colr, r, 4)
+                n = max(1, SPEED_VALUES.index(o.val) if o.val in SPEED_VALUES else 1)
+                step = max(5, min(10, 20 // n))        # more chevrons = faster
+                for i in range(n):
+                    x0 = cx - 3 - (n - 1) * step // 2 + i * step
+                    pygame.draw.lines(s, colr, False, [(x0, cy - 8), (x0 + 5, cy),
+                                                       (x0, cy + 8)], 2)
+                lab = self.small.render("%gx" % o.val, True, colr)
+                lr = pygame.Rect(0, 0, lab.get_width() + 8, lab.get_height() + 4)
+                lr.midtop = (cx, max(top, CEIL) + 6)
+                pygame.draw.rect(s, (8, 8, 20), lr, border_radius=4)
+                s.blit(lab, (lr.x + 4, lr.y + 2))
+            else:
+                colr = (255, 225, 30) if o.up else (60, 170, 255)
+                pygame.draw.ellipse(s, colr, r, 4)
+                d = -1 if o.up else 1
+                pygame.draw.polygon(s, colr, [(cx - 8, cy - 8 * d), (cx + 8, cy - 8 * d),
+                                              (cx, cy + 10 * d)])
         if ghost and self.state == "editor":
             draw_dashed_rect(s, pygame.Rect(int(sx), sy, B, B), (255, 255, 255), 5, 4, 1)
         if self.show_hitboxes and k != "block":
-            pygame.draw.rect(s, (255, 60, 60), o.rect.move(-int(cam), 0), 1)
+            pygame.draw.rect(s, (255, 60, 60), o.rect.move(-int(cam), int(self.camy)), 1)
 
     def draw_hud(self, acc):
         s = self.screen
