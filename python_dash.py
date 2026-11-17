@@ -234,6 +234,7 @@ DIFF_COLOR = {
     "TEST": (120, 200, 255), "EASY": (90, 230, 120), "NORMAL": (255, 220, 70),
     "HARD": (255, 140, 60), "INSANE": (255, 70, 90), "CUSTOM": (200, 160, 255),
     "OTHER": (120, 230, 200), "DEMON": (255, 40, 40),
+    "AUTO": (255, 190, 110), "UNRATED": (150, 155, 185),
 }
 PRIMARY = (90, 245, 120)
 SECONDARY = (60, 200, 255)
@@ -268,8 +269,10 @@ MAIN_META = os.path.join(MAIN_DIR, "_main_levels.json")   # names, difficulties,
 SUBMIT_DIR = (os.path.join(SHARED_DIR, "PythonDashSubmissions") if SHARED_DIR
               else None)                                  # in-game level upload requests
 ADMIN_ACCOUNTS = {"augmentedmagic", "axo"}                # who can manage main levels
-MAIN_DIFFICULTIES = ["TEST", "EASY", "NORMAL", "HARD", "INSANE", "DEMON"]
-DIFF_ORDER = ["TEST", "EASY", "NORMAL", "HARD", "INSANE", "DEMON"]
+MAIN_DIFFICULTIES = ["AUTO", "TEST", "EASY", "NORMAL", "HARD", "INSANE", "DEMON"]
+DIFF_ORDER = ["AUTO", "TEST", "EASY", "NORMAL", "HARD", "INSANE", "DEMON"]
+# AUTO = the level plays itself: it can be finished without pressing anything.  The game
+# works that out by itself (see plays_itself) - and an admin can also rate a level AUTO.
 OTHER_DIR = os.path.join(DATA_DIR, "downloaded_levels")  # levels made by someone else
 OLD_OTHER_DIR = os.path.join(DATA_DIR, "other_levels")    # (its name before)
 REPO = "adventure-car/python_dash"                         # online levels + music live here
@@ -1137,6 +1140,7 @@ class LevelData:
         self.description = ""   # shown in level select; saved in the level file
         self.author = ""     # username of whoever exported it
         self.music = ""      # file name in the music folder ("" = no song)
+        self.difficulty = ""  # rating given when it was approved ("" = unrated)
         self.path = None
 
     def snapshot(self):
@@ -1210,6 +1214,8 @@ class LevelData:
                                for (c, r), (k, f, g, col) in sorted(self.bg.items())]
         if self.theme:
             j["theme"] = self.theme
+        if self.difficulty:
+            j["difficulty"] = self.difficulty
         if [tuple(p) for p in self.palette] != DEFAULT_PALETTE:
             j["palette"] = [list(p) for p in self.palette]
         if self.texts:
@@ -1229,6 +1235,8 @@ class LevelData:
         d = cls(str(j.get("name", "Untitled"))[:NAME_MAX])
         d.description = str(j.get("description", ""))[:DESC_MAX]
         d.author = str(j.get("author", "") or "")[:NAME_MAX]
+        diff = str(j.get("difficulty") or "").upper()
+        d.difficulty = diff if diff in MAIN_DIFFICULTIES else ""
         sm = j.get("start_mode", "cube")
         d.start_mode = sm if sm in MODE_ORDER else "cube"
         fin = j.get("finish")
@@ -1322,11 +1330,72 @@ def level_to_data(level, name):
     return d
 
 
+class _AutoRun:
+    """Just enough of a Game for a player to run through a level by itself."""
+    noclip = False
+
+    def __init__(self, level):
+        self.level, self.dead, self.cp_section = level, False, 0
+
+    def kill(self):
+        self.dead = True
+
+    def burst(self, *a, **k):
+        pass
+
+
+_auto_cache = {}
+
+
+def plays_itself(data):
+    """True if the level can be finished without pressing anything (an AUTO level).
+    Runs the level with no input - fast: a level that needs input fails within a few
+    seconds of play.  The answer is remembered for each version of a level."""
+    try:
+        key = hashlib.sha1(json.dumps(data.to_json(), sort_keys=True).encode()).hexdigest()
+    except Exception:
+        return False
+    if key in _auto_cache:
+        return _auto_cache[key]
+    ok = False
+    try:
+        lv = Level(LevelDef(data.name, "CUSTOM", "", lambda l, d=data: d.build(l)))
+        run, p = _AutoRun(lv), Player()
+        p.respawn(lv, 0)
+        lv.reset_runtime(p.x)
+        end = lv.end_col * B
+        for _ in range(40000):                   # (far longer than any level)
+            if run.dead or p.x >= end:
+                break
+            lv.update(p.x, p.y)
+            p.step(False, run)
+        ok = not run.dead and p.x >= end and bool(data.cells)   # (an empty level isn't one)
+    except Exception:
+        ok = False
+    _auto_cache[key] = ok
+    return ok
+
+
+def level_rating(data):
+    """A level's rating: what it was rated when approved, AUTO if it plays itself, or
+    UNRATED."""
+    if data.difficulty:
+        return data.difficulty
+    return "AUTO" if plays_itself(data) else "UNRATED"
+
+
 def custom_def(data, origin="CUSTOM"):
     """origin: "CUSTOM" = built by you in the editor, "OTHER" = imported level file."""
     what = "made in the editor" if origin == "CUSTOM" else "downloaded level"
     blurb = data.description or "%d objects  -  %s" % (data.object_count(), what)
-    ld = LevelDef(data.name, origin, blurb, lambda lv, d=data: data.build(lv))
+    rating = level_rating(data)
+    if origin == "OTHER" and rating != "UNRATED":       # a downloaded level shows its rating
+        origin_tag = rating
+    elif origin == "CUSTOM" and rating == "AUTO":       # yours: AUTO if it plays itself
+        origin_tag = "AUTO"
+    else:
+        origin_tag = origin
+    ld = LevelDef(data.name, origin_tag, blurb, lambda lv, d=data: data.build(lv))
     ld.description = data.description
     ld.path = data.path
     ld.author = data.author
@@ -3983,7 +4052,8 @@ def fetch_online_levels(out):
                 found.append({"file": fn, "raw": raw, "name": d.name, "author": d.author,
                               "modes": d.mode_list(), "objects": d.object_count(),
                               "music": j.get("music") or "", "description": d.description,
-                              "uploaded": str(j.get("uploaded_at") or "")})
+                              "uploaded": str(j.get("uploaded_at") or ""),
+                              "rating": level_rating(d)})
             except Exception:
                 continue
         out["levels"] = found
@@ -6398,7 +6468,8 @@ class Game:
         box = pygame.Rect(0, 0, 680, 330)
         box.center = (W // 2, H // 2 + 20)
         name = pygame.Rect(box.x + 30, box.y + 92, box.w - 60, 42)
-        diffs = [pygame.Rect(box.x + 30 + i * 104, box.y + 180, 98, 40)
+        step = (box.w - 60) // len(MAIN_DIFFICULTIES)
+        diffs = [pygame.Rect(box.x + 30 + i * step, box.y + 180, step - 6, 40)
                  for i in range(len(MAIN_DIFFICULTIES))]
         btns = {"save": pygame.Rect(box.x + 30, box.bottom - 62, 190, 42),
                 "remove": pygame.Rect(box.x + 232, box.bottom - 62, 190, 42),
@@ -7104,21 +7175,24 @@ class Game:
             if not q:
                 return [{"type": "online_msg", "name": "Type to search the online levels",
                          "sub": "Click the search box (or press F), then type a level name, "
-                                "a maker or a word from the description",
+                                "a maker, a rating (like auto or hard) or a word from the "
+                                "description",
                          "tag": "", "col": (150, 160, 200), "modes": [], "best": None}]
             levels = [lv for lv in levels if q in lv["name"].lower()
                       or q in (lv["author"] or "").lower()
+                      or q == (lv.get("rating") or "").lower()
                       or q in (lv.get("description") or "").lower()]
         items = []
         for lv in levels:
             have = os.path.isfile(os.path.join(OTHER_DIR, lv["file"]))
             title = lv["name"] + ((" by " + lv["author"]) if lv["author"] else "")
+            rating = lv.get("rating") or "UNRATED"
             items.append({"type": "online", "info": lv, "name": title,
                           "sub": ("Downloaded - ENTER to play" if have else
                                   "%d objects%s  -  ENTER to download" % (
                                       lv["objects"], "  -  has music" if lv["music"] else "")),
-                          "tag": "DOWNLOADED" if have else "GET",
-                          "col": (90, 230, 120) if have else (120, 200, 255),
+                          "tag": rating,
+                          "col": DIFF_COLOR.get(rating, (120, 200, 255)),
                           "modes": [m for m in lv["modes"] if m in ACCENT], "best": None})
         if not items:
             msg = {"browse": ("No levels online yet", "github.com/%s - levels folder" % REPO),
@@ -7230,7 +7304,8 @@ class Game:
             for d in self.custom:
                 items.append({"type": "custom", "data": d, "name": d.name, "path": d.path,
                               "sub": d.description or "%d objects" % d.object_count(),
-                              "tag": "CUSTOM", "col": DIFF_COLOR["CUSTOM"],
+                              "tag": "AUTO" if plays_itself(d) else "CUSTOM",
+                              "col": DIFF_COLOR["AUTO" if plays_itself(d) else "CUSTOM"],
                               "modes": d.mode_list(), "best": None})
         else:
             defs = list(LEVELS) + [custom_def(d, "OTHER") for d in load_custom_levels(OTHER_DIR)]
