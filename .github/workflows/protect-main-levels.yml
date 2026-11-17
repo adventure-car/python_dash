@@ -1,0 +1,30 @@
+# Fails (red X) when anyone other than AXO or AugmentedMagic changes main_levels/.
+# Make it required in Settings > Branches > main > "Require status checks to pass".
+name: Protect main levels
+
+on:
+  pull_request:
+    paths: ["main_levels/**"]
+  push:
+    branches: [main]
+    paths: ["main_levels/**"]
+
+jobs:
+  check-editor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only AXO and AugmentedMagic may edit main_levels/
+        env:
+          # GitHub usernames allowed to change main_levels/ (space separated).
+          # (same names as the /main_levels/ line in .github/CODEOWNERS)
+          ALLOWED: "AXO123456 adventure-car"
+          WHO: ${{ github.event.pull_request.user.login || github.actor }}
+        run: |
+          for name in $ALLOWED; do
+            if [ "${name,,}" = "${WHO,,}" ]; then
+              echo "$WHO may edit main_levels/"
+              exit 0
+            fi
+          done
+          echo "::error::$WHO is not allowed to change main_levels/ (only AXO and AugmentedMagic)"
+          exit 1

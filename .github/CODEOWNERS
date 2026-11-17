@@ -3,3 +3,8 @@
 /levels/   @AXO123456 @adventure-car
 /music/    @AXO123456 @adventure-car
 /.github/  @AXO123456 @adventure-car
+
+# Main levels: ONLY AXO and AugmentedMagic.  To make GitHub enforce it, protect `main`
+# (Settings > Branches): "Require a pull request" + "Require review from Code Owners",
+# and make the "Protect main levels" check required.
+/main_levels/  @AXO123456 @adventure-car
