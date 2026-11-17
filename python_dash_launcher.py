@@ -11,6 +11,14 @@ What it does
        If the player has no copy, it is saved in their user (home) folder.
     2. Runs Update(), which makes the installed script smaller.
 * Play launches the game.
+* Hosts the Python Dash server: on the computer that has python_dash_server.py (in
+  your home folder, ~/PythonDash, or next to this launcher) it starts the server in
+  the background when the launcher opens, if it isn't running already.  It keeps
+  running after the launcher and the game close.  Switch it ON / OFF for players on
+  its review page (http://localhost:8766) - while it's off, games go to the backup
+  servers in python_dash.py.  Your own game talks to it on this computer.
+  Later, to use an AWS server instead: copy python_dash_server.py there, put its
+  address in SERVER_URL in python_dash.py, and switch this one off (or delete it).
 
 Usage
 -----
@@ -34,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -54,6 +63,15 @@ RAW_URL = (
     f"https://raw.githubusercontent.com/"
     f"{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{GAME_FILENAME}"
 )
+
+# The Python Dash server (python_dash_server.py) - hosted from here if you have it.
+SERVER_FILENAME = "python_dash_server.py"
+SERVER_PLACES = [Path.home(), Path.home() / "PythonDash", Path(__file__).resolve().parent]
+SERVER_PORT = 8765                                   # API_PORT in python_dash_server.py
+SERVER_DATA = Path.home() / ".python_dash_server"
+SERVER_PID = SERVER_DATA / "server.pid"
+SERVER_LOG = SERVER_DATA / "server.log"
+LOCAL_SERVER = f"http://127.0.0.1:{SERVER_PORT}"
 
 CONFIG_FILE = Path(__file__).with_name("launcher_config.json")
 VERSION_FILE_NAME = ".python_dash_version"  # sits next to the game file
@@ -157,6 +175,61 @@ def check_and_install(game_path: Path) -> str:
         return "Updated to the latest version"
 
     return "Already up to date"
+
+
+# --------------------------------------------------------------------------
+# Hosting the Python Dash server
+# --------------------------------------------------------------------------
+def find_server() -> Path | None:
+    """python_dash_server.py, if this computer has it (only the host does)."""
+    for place in SERVER_PLACES:
+        p = place / SERVER_FILENAME
+        if p.is_file():
+            return p
+    return None
+
+
+def server_status() -> dict | None:
+    """The local server's status ({"ok", "hosting"}), or None if it isn't running."""
+    try:
+        with urllib.request.urlopen(LOCAL_SERVER + "/api/status", timeout=1.5) as r:
+            j = json.loads(r.read().decode("utf-8"))
+            return j if isinstance(j, dict) and j.get("ok") else None
+    except Exception:
+        return None
+
+
+def server_running() -> bool:
+    return server_status() is not None
+
+
+def start_server(path: Path) -> str:
+    if server_running():
+        return "The server is already running"
+    SERVER_DATA.mkdir(parents=True, exist_ok=True)
+    log = open(SERVER_LOG, "ab")
+    kwargs = {}
+    if sys.platform.startswith("win"):        # keep running after the launcher closes
+        kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
+                                   | getattr(subprocess, "DETACHED_PROCESS", 0x8))
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen([sys.executable, str(path)], cwd=str(path.parent),
+                                stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, **kwargs)
+    except OSError as e:
+        return f"Couldn't start the server ({e.strerror or e})"
+    finally:
+        log.close()
+    SERVER_PID.write_text(str(proc.pid))
+    for _ in range(20):                        # wait up to ~5 s for it to answer
+        if server_running():
+            return "Server started - players can sign in and upload"
+        if proc.poll() is not None:
+            return f"The server stopped straight away - see {SERVER_LOG}"
+        time.sleep(0.25)
+    return f"Server starting... (if it doesn't come on, see {SERVER_LOG})"
 
 
 # --------------------------------------------------------------------------
@@ -376,7 +449,9 @@ def run_menu(game_path: Path | None) -> None:
     import pygame
 
     pygame.init()
-    screen = pygame.display.set_mode((640, 440))
+    server_file = find_server()                  # None for everyone but the host
+    extra = 30 if server_file else 0
+    screen = pygame.display.set_mode((640, 440 + extra))
     pygame.display.set_caption("Python Dash Launcher")
     clock = pygame.time.Clock()
     title_font = pygame.font.Font(None, 72)
@@ -391,6 +466,20 @@ def run_menu(game_path: Path | None) -> None:
     loc_btn.center = (320, 292)
 
     state = State()
+    hosting = {"on": False, "players": True, "note": ""}   # is the server running?
+
+    def host_server():
+        """Start the server if it isn't running, then keep an eye on it."""
+        if not server_running():
+            hosting["note"] = start_server(server_file)
+        while True:
+            st = server_status()
+            hosting["on"] = st is not None
+            hosting["players"] = bool(st and st.get("hosting", True))
+            time.sleep(2)
+
+    if server_file:
+        threading.Thread(target=host_server, daemon=True).start()
 
     def choose_location(start: Path) -> Path | None:
         """Open the browser; returns the chosen game path (or None)."""
@@ -438,9 +527,13 @@ def run_menu(game_path: Path | None) -> None:
                         run_update_async(state, game_path)
                 elif play_btn.collidepoint(event.pos):
                     if game_path.exists():
+                        env = dict(os.environ)
+                        if server_file and hosting["on"]:
+                            # the host's own game uses the server on this computer
+                            env["PYTHON_DASH_SERVER"] = LOCAL_SERVER
                         subprocess.Popen(
                             [sys.executable, str(game_path)],
-                            cwd=str(game_path.parent),
+                            cwd=str(game_path.parent), env=env,
                         )
                         running = False
                     else:
@@ -452,14 +545,26 @@ def run_menu(game_path: Path | None) -> None:
         draw_button(play_btn, "Play", enabled=not state.busy)
         draw_button(update_btn, "Update", enabled=not state.busy)
         draw_button(loc_btn, "Change Location", enabled=not state.busy, font=small_font)
+        if server_file:
+            if hosting["on"]:
+                text = ("Server ON for players" if hosting["players"] else
+                        "Server switched OFF for players") + "  -  switch: localhost:8766"
+            else:
+                text = hosting["note"] or "Starting the server..."
+            dot = ((90, 230, 120) if hosting["players"] else (255, 200, 60)) \
+                if hosting["on"] else (220, 80, 90)
+            st = small_font.render(shorten(text, small_font, 560), True, (200, 200, 210))
+            r = st.get_rect(center=(330, 345))
+            screen.blit(st, r)
+            pygame.draw.circle(screen, dot, (r.left - 14, r.centery), 6)
 
         with state.lock:
             status = state.status
         msg = small_font.render(shorten(status, small_font, 600), True, (200, 200, 210))
-        screen.blit(msg, msg.get_rect(center=(320, 360)))
+        screen.blit(msg, msg.get_rect(center=(320, 360 + extra)))
         path_txt = small_font.render(
             shorten(str(game_path), small_font, 600), True, (120, 120, 135))
-        screen.blit(path_txt, path_txt.get_rect(center=(320, 395)))
+        screen.blit(path_txt, path_txt.get_rect(center=(320, 395 + extra)))
 
         pygame.display.flip()
         clock.tick(30)

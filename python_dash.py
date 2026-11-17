@@ -283,8 +283,21 @@ REPO_BRANCH = "main"
 #   * U (upload) on the BUILD LEVELS screen sends the level to the server, where
 #     AXO or AugmentedMagic review it; approved levels go into the GitHub repo
 # Left empty, the game works as before (shared online folder, or Guest only).
+#
+# BACKUP_SERVER_URLS: where the game goes instead when SERVER_URL is off or switched OFF
+# on its review page (e.g. a future
+# AWS server: ["http://AWS-ADDRESS:8765"]).  It tries them in order and comes back to
+# SERVER_URL once that is on again.  The PYTHON_DASH_BACKUP_SERVERS environment variable
+# (comma separated) works too.  Moving to AWS for good = put its address in SERVER_URL.
 # --------------------------------------------------------------------------
 SERVER_URL = (os.environ.get("PYTHON_DASH_SERVER") or "").strip().rstrip("/")
+BACKUP_SERVER_URLS = []          # none yet - add the AWS server here when you have one
+BACKUP_SERVER_URLS += [u for u in (os.environ.get("PYTHON_DASH_BACKUP_SERVERS") or "")
+                       .split(",") if u.strip()]
+SERVER_URLS = [u.strip().rstrip("/") for u in [SERVER_URL] + BACKUP_SERVER_URLS
+               if u and u.strip()]
+SERVER_URLS = list(dict.fromkeys(SERVER_URLS))       # (no repeats, order kept)
+SERVER_ON = bool(SERVER_URLS)
 OLD_SAVE_PATH = os.path.join(os.path.expanduser("~"), ".dash_test_course.json")
 MUSIC_DIR = os.path.join(DATA_DIR, "music")          # songs attached to levels
 MUSIC_EXTS = (".mp3", ".ogg", ".wav", ".flac", ".opus")
@@ -3696,8 +3709,8 @@ def store_server_session(user):
     """Remember (on this computer) which server account is signed in, or forget it."""
     local = _read_local_accounts()
     if user:
-        local["server_session"] = {"url": SERVER_URL, "name": user["name"],
-                                   "token": user["token"]}
+        local["server_session"] = {"url": user.get("url") or SERVER_URLS[0],
+                                   "name": user["name"], "token": user["token"]}
     else:
         local.pop("server_session", None)
     write_json(ACCOUNTS_PATH, local)
@@ -3705,9 +3718,10 @@ def store_server_session(user):
 
 def saved_server_session():
     sess = _read_local_accounts().get("server_session")
-    if (isinstance(sess, dict) and sess.get("url") == SERVER_URL and SERVER_URL
+    if (isinstance(sess, dict) and sess.get("url") in SERVER_URLS
             and isinstance(sess.get("name"), str) and isinstance(sess.get("token"), str)):
-        return {"name": sess["name"], "token": sess["token"], "server": True}
+        return {"name": sess["name"], "token": sess["token"], "server": True,
+                "url": sess["url"]}
     return None
 
 
@@ -3724,36 +3738,54 @@ def account_save_path(user, root=None):
 # Talking to the Python Dash server (SERVER_URL)
 # --------------------------------------------------------------------------
 class ServerError(Exception):
-    def __init__(self, msg, status=0):
+    def __init__(self, msg, status=0, server=None):
         super().__init__(msg)
-        self.status = status
+        self.status = status        # 0 = no server could be reached
+        self.server = server        # which server said no
+
+
+_server_down = {}               # server url -> time it can be tried again
+SERVER_RETRY_SECONDS = 60
 
 
 def server_call(method, path, body=None, token=None, timeout=12):
-    """One JSON request to the server.  Returns the reply (a dict) or raises ServerError
-    with a message that can be shown to the player."""
-    if not SERVER_URL:
+    """One JSON request to the server.  If SERVER_URL is off it is redirected to the
+    backup servers, in order.  Returns the reply (a dict, with "_server" = the address
+    that answered) or raises ServerError with a message to show the player."""
+    if not SERVER_URLS:
         raise ServerError("No server is set up")
     data = json.dumps(body).encode("utf-8") if body is not None else None
     headers = {"User-Agent": "PythonDash", "Content-Type": "application/json"}
     if token:
         headers["Authorization"] = "Bearer " + token
-    req = urllib.request.Request(SERVER_URL + path, data=data, headers=headers,
-                                 method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            reply = json.loads(r.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as ex:
+    now = __import__("time").time()
+    order = ([u for u in SERVER_URLS if _server_down.get(u, 0) <= now]
+             + [u for u in SERVER_URLS if _server_down.get(u, 0) > now])  # down ones last
+    for url in order:
+        req = urllib.request.Request(url + path, data=data, headers=headers, method=method)
         try:
-            msg = json.loads(ex.read().decode("utf-8")).get("error")
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                reply = json.loads(r.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as ex:
+            if ex.code == 503:                      # switched OFF on its review page:
+                _server_down[url] = now + SERVER_RETRY_SECONDS      # try the next one
+                continue
+            _server_down.pop(url, None)             # it's on - and it answered "no"
+            try:
+                msg = json.loads(ex.read().decode("utf-8")).get("error")
+            except Exception:
+                msg = None
+            raise ServerError(msg or "The server said no (%d)" % ex.code, ex.code, url)
         except Exception:
-            msg = None
-        raise ServerError(msg or "The server said no (%d)" % ex.code, ex.code)
-    except Exception:
-        raise ServerError("Can't reach the Python Dash server")
-    if not isinstance(reply, dict):
-        raise ServerError("The server sent something odd back")
-    return reply
+            _server_down[url] = now + SERVER_RETRY_SECONDS    # off: try the next one
+            continue
+        _server_down.pop(url, None)
+        if not isinstance(reply, dict):
+            raise ServerError("The server sent something odd back", 0, url)
+        reply["_server"] = url
+        return reply
+    raise ServerError("Can't reach the Python Dash server" + (
+        "s" if len(SERVER_URLS) > 1 else ""))
 
 
 def progress_only(data):
@@ -6054,7 +6086,7 @@ class Game:
         self.server_pull = None      # progress being fetched from the server
         cur = self.accounts.get("current")
         u = self.accounts["users"].get(cur) if cur else None
-        sess = saved_server_session() if SERVER_URL else None
+        sess = saved_server_session() if SERVER_ON else None
         if sess:
             self.load_profile(sess)  # stay signed in to the server account
         elif u and u.get("salt") in self.known_salts.get(cur, {u.get("salt")}):
@@ -6142,7 +6174,8 @@ class Game:
         self.skins = dict(sk) if isinstance(sk, dict) else {}
         if user and user.get("server"):
             _sync.start(user["token"])
-            self.server_pull = {"status": "loading"}      # get the server's copy
+            self.server_pull = {"status": "loading",       # get the server's copy
+                                "url": user.get("url") or SERVER_URLS[0]}
             threading.Thread(target=self.pull_progress,
                              args=(self.server_pull, user["token"]), daemon=True).start()
         if user:
@@ -6156,7 +6189,10 @@ class Game:
                 reply.get("progress"), dict) else {}
             out["status"] = "ok"
         except ServerError as ex:
-            out["status"] = "denied" if ex.status == 401 else "error"
+            # Only the server the account signed in on can say the sign-in ran out (a
+            # backup server doesn't know it: keep playing, progress syncs later).
+            out["status"] = "denied" if (ex.status == 401 and ex.server == out.get("url")) \
+                else "error"
 
     def server_sync_update(self):
         """Called every frame: fold progress from the server into this computer's copy."""
@@ -6549,7 +6585,7 @@ class Game:
             pass
 
     def open_account(self, mode, back="home"):
-        if not self.acc_root and not SERVER_URL:
+        if not self.acc_root and not SERVER_ON:
             self.say(self.NEED_ONLINE)
             return
         self.acct = {"mode": mode, "fields": ["", "", ""], "sel": 0, "err": "",
@@ -6574,7 +6610,7 @@ class Game:
     def account_submit(self):
         a = self.acct
         name, pw, pw2 = a["fields"]
-        if SERVER_URL:                  # accounts live on the Python Dash server
+        if SERVER_ON:                  # accounts live on the Python Dash server
             signup = a["mode"] == "signup"
             if signup:
                 if pw != pw2:
@@ -6595,7 +6631,7 @@ class Game:
                     a["fields"][1] = ""
                 return
             user = {"name": str(reply.get("name") or name), "token": str(reply.get("token")),
-                    "server": True}
+                    "server": True, "url": reply.get("_server")}
             self.sign_in(user)
             self.say(("Account created - welcome, %s!" if signup else "Welcome back, %s!")
                      % user["name"]
@@ -7252,7 +7288,7 @@ class Game:
         it = self.items[self.sel]
         if it.get("type") != "custom" or not it.get("path"):
             return
-        if SERVER_URL:
+        if SERVER_ON:
             self.upload_to_server(it)
             return
         if not SUBMIT_DIR:
@@ -7295,6 +7331,16 @@ class Game:
                 server_call("POST", "/api/levels/submit", {"level": j}, token, timeout=120)
                 self.say("Uploaded \"%s\" - AXO or AugmentedMagic will review it" % data.name)
             except ServerError as ex:
+                if ex.status == 0 and SUBMIT_DIR:     # every server is off: shared folder
+                    try:
+                        os.makedirs(SUBMIT_DIR, exist_ok=True)
+                        with open(unique_level_path(data.name, SUBMIT_DIR), "w") as f:
+                            json.dump(j, f)
+                        self.say("The server is off - \"%s\" went to the shared uploads "
+                                 "folder instead" % data.name)
+                        return
+                    except OSError:
+                        pass
                 self.say("Upload failed: %s" % ex)
         threading.Thread(target=send, daemon=True).start()
 
@@ -8185,7 +8231,7 @@ class Game:
             tt = self.font.render(label, True, colr)
             s.blit(tt, (r.centerx - tt.get_width() // 2, r.centery - tt.get_height() // 2))
         who = ("Signed in as " + self.account) if self.account else (
-            "Playing as Guest" if (self.acc_root or SERVER_URL)
+            "Playing as Guest" if (self.acc_root or SERVER_ON)
             else "Guest - accounts need an online folder")
         wt = self.small.render(who, True, (190, 200, 235))
         last = max(r.right for r in self.account_buttons().values())
