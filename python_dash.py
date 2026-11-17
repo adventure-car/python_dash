@@ -290,7 +290,8 @@ REPO_BRANCH = "main"
 # SERVER_URL once that is on again.  The PYTHON_DASH_BACKUP_SERVERS environment variable
 # (comma separated) works too.  Moving to AWS for good = put its address in SERVER_URL.
 # --------------------------------------------------------------------------
-SERVER_URL = (os.environ.get("PYTHON_DASH_SERVER") or "").strip().rstrip("/")
+SERVER_URL = (os.environ.get("PYTHON_DASH_SERVER")
+              or "http://10.6.1.143:8765").strip().rstrip("/")     # the host's computer
 BACKUP_SERVER_URLS = []          # none yet - add the AWS server here when you have one
 BACKUP_SERVER_URLS += [u for u in (os.environ.get("PYTHON_DASH_BACKUP_SERVERS") or "")
                        .split(",") if u.strip()]
