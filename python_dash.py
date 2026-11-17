@@ -291,8 +291,10 @@ REPO_BRANCH = "main"
 # (comma separated) works too.  Moving to AWS for good = put its address in SERVER_URL.
 # --------------------------------------------------------------------------
 SERVER_URL = (os.environ.get("PYTHON_DASH_SERVER")
-              or "http://10.6.1.143:8765").strip().rstrip("/")     # the host's computer
-BACKUP_SERVER_URLS = []          # none yet - add the AWS server here when you have one
+              or "http://72.74.146.144:8765").strip().rstrip("/")  # the host's computer
+# The host's computer on its own network (for players on the same Wi-Fi, whose router
+# may not loop the public address back).  Add the AWS server here when there is one.
+BACKUP_SERVER_URLS = ["http://10.6.1.143:8765"]
 BACKUP_SERVER_URLS += [u for u in (os.environ.get("PYTHON_DASH_BACKUP_SERVERS") or "")
                        .split(",") if u.strip()]
 # The server on THIS computer (the host's) is always tried last, so the host's game
