@@ -4039,6 +4039,24 @@ def fetch_hardest(out):
         out["status"] = "error"
 
 
+def sync_downloaded_rating(fn, rating):
+    """A level rated (or re-rated) after you downloaded it: give your copy that rating
+    too, so the Downloaded Levels tab shows it.  Nothing else in your copy changes."""
+    path = os.path.join(OTHER_DIR, os.path.basename(fn))
+    try:
+        with open(path) as f:
+            j = json.load(f)
+    except (OSError, ValueError):
+        return                                        # (not downloaded)
+    if not isinstance(j, dict) or str(j.get("difficulty") or "").upper() == rating:
+        return
+    if rating:
+        j["difficulty"] = rating
+    else:
+        j.pop("difficulty", None)
+    write_json(path, j)
+
+
 def fetch_online_levels(out):
     """Fill out["levels"] with what's online: name, author, modes and the raw file."""
     try:
@@ -4055,6 +4073,7 @@ def fetch_online_levels(out):
                               "music": j.get("music") or "", "description": d.description,
                               "uploaded": str(j.get("uploaded_at") or ""),
                               "rating": level_rating(d)})
+                sync_downloaded_rating(fn, d.difficulty)
             except Exception:
                 continue
         out["levels"] = found
