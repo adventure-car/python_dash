@@ -4051,6 +4051,7 @@ def fetch_online_levels(out):
                 d = LevelData.from_json(j)
                 found.append({"file": fn, "raw": raw, "name": d.name, "author": d.author,
                               "modes": d.mode_list(), "objects": d.object_count(),
+                              "coins": sum(1 for v in d.cells.values() if v[0] == "coin"),
                               "music": j.get("music") or "", "description": d.description,
                               "uploaded": str(j.get("uploaded_at") or ""),
                               "rating": level_rating(d)})
@@ -7187,13 +7188,20 @@ class Game:
             have = os.path.isfile(os.path.join(OTHER_DIR, lv["file"]))
             title = lv["name"] + ((" by " + lv["author"]) if lv["author"] else "")
             rating = lv.get("rating") or "UNRATED"
+            key = "other:" + lv["file"]            # (custom_def's key for downloaded levels)
+            best = self.save.get(key, 0)
             items.append({"type": "online", "info": lv, "name": title,
-                          "sub": ("Downloaded - ENTER to play" if have else
+                          "sub": (("COMPLETE - ENTER to play again" if best >= 100 else
+                                   "Downloaded - ENTER to play") if have else
                                   "%d objects%s  -  ENTER to download" % (
                                       lv["objects"], "  -  has music" if lv["music"] else "")),
                           "tag": rating,
                           "col": DIFF_COLOR.get(rating, (120, 200, 255)),
-                          "modes": [m for m in lv["modes"] if m in ACCENT], "best": None})
+                          "modes": [m for m in lv["modes"] if m in ACCENT],
+                          # your progress - the same as on the Downloaded Levels tab
+                          "best": best if (have or best) else None,
+                          "coins": (len(self.save.get(key + "#coins", [])), lv.get("coins", 0))
+                          if (have or best) else None})
         if not items:
             msg = {"browse": ("No levels online yet", "github.com/%s - levels folder" % REPO),
                    "recent": ("No new uploads yet",
