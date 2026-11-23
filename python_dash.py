@@ -95,6 +95,9 @@ Extras (all trigger just by touching them - no button needed, in EVERY mode):
   yellow pad / yellow orb   bounce you up        blue pad / blue orb  slam you down
   pink pad / pink orb       a weaker bounce      red pad / red orb    a stronger bounce
   green dash orb            fly straight ahead while you hold (magenta: flips gravity first)
+  orange pad / orange orb   flip gravity         purple pad / purple orb  teleport to the
+                                                 opposite surface, like a spider click
+  click pads                the same pads, but they only work if you click on them
   gravity portals  flip gravity      speed portals  0.8x 1x 1.25x 1.5x 1.8x
   slopes           45-degree (1x1), gentle 1:2 (2 wide) and steep 2:1 (2 tall), facing any
                    way - run up / down them (deadly to the wave)
@@ -103,7 +106,8 @@ Extras (all trigger just by touching them - no button needed, in EVERY mode):
 
 Level editor
 ------------
-  The palette has tabs:  OBJECTS  SLOPES  PADS & ORBS  PORTALS  SPEED  TRIGGERS
+  The palette has tabs:  OBJECTS  SLOPES  PADS  ORBS  CLICK PADS  PORTALS  SPEED  TRIGGERS
+  (every pad and orb has an invisible "I-" version)
   (TAB / Shift+TAB)
   Left click / drag   place            Right click / drag  erase
   1-8  tool in the tab's first row     Shift+1-8  second row
@@ -112,6 +116,8 @@ Level editor
        Ctrl/Cmd+D duplicate   DELETE remove   G put it in the current group
   DELETE / BACKSPACE with nothing selected deletes the object under the mouse.
   E  eraser       B / "EDIT BG"  edit the background (decoration) layer
+  I / "INVIS"  what you place is invisible while playing (blocks, spikes, slopes, pads,
+       orbs) - with a selection, hides / shows the selected objects instead
   [ ]  change the current group (new objects go in it)  - or click GROUP
   SONGS  pick the level's song from your songs folder (SPACE previews it).  The
          SONGS button on the home screen opens that folder - drop .mp3 / .ogg / .wav
@@ -124,7 +130,10 @@ Level editor
     PARTICLE a burst (or stream) of particles at the trigger or the player
     PULSE    flashes the whole screen, or one group, a palette colour
     ROTATE   spins a group around its own middle (or around another group)
-    COUNT    adds to a counter; when it reaches the target a group appears / disappears
+    COUNT    adds to a counter when you pass it - or for every click after it; when the
+             counter reaches the target a group appears / disappears
+  Any trigger can have a BOX (width x height): then it only fires if you go through the
+  box instead of when you pass its column - good for hidden coin paths.
   TEXT  click a cell and type - text boxes can be in groups too.
   Mouse wheel, A/D or LEFT/RIGHT scroll       Ctrl/Cmd+Z undo, Ctrl/Cmd+Y redo
   Levels can be built up to 108 blocks high: W/S, UP/DOWN, PAGE UP/DOWN or Shift+wheel
@@ -191,19 +200,45 @@ SPIDER_G, SPIDER_MAXFALL = 1.5, 18
 SWING_A, SWING_MAX = 0.75, 8.5
 PAD_V, ORB_V, DORB_V = 16.0, 12.5, 14.0
 DPAD_V = 16.0                 # a down pad slams you toward the floor
-# weaker (pink) and stronger (red) versions of the yellow jump pad / orb
-JUMP_POWER = {"pad": PAD_V, "ppad": 11.5, "rpad": 20.5,
-              "orb": ORB_V, "porb": 9.0, "rorb": 16.0}
+GRAV_KICK = 7.0               # gravity pads / orbs: the push toward the new gravity
+# What each pad / orb does: (effect, power).  Effects:
+#   up      bounce away from gravity (yellow normal, pink weaker, red stronger)
+#   down    slam toward gravity (blue)
+#   grav    flip gravity and push you toward the new floor (orange)
+#   spider  teleport to the opposite surface, like a spider click (purple)
+#   dash / gdash   fly straight ahead while you hold (green; magenta flips gravity)
+PAD_FX = {"pad": ("up", PAD_V), "ppad": ("up", 11.5), "rpad": ("up", 20.5),
+          "dpad": ("down", DPAD_V), "gpad": ("grav", GRAV_KICK), "spad": ("spider", 0)}
+ORB_FX = {"orb": ("up", ORB_V), "porb": ("up", 9.0), "rorb": ("up", 16.0),
+          "dorb": ("down", DORB_V), "gorb": ("grav", GRAV_KICK), "sorb": ("spider", 0),
+          "dashorb": ("dash", 0), "gdashorb": ("gdash", 0)}
+# Click pads: the same pads, but they only work if you click while touching them.
+CLICK_PADS = {"c" + k: k for k in PAD_FX}           # "cpad" -> "pad", ...
 UP_PADS = ("pad", "ppad", "rpad")
-PADS = UP_PADS + ("dpad",)
+TOP_PADS = ("dpad", "cdpad")                         # (sit on the top of their cell)
+PADS = tuple(PAD_FX) + tuple(CLICK_PADS)
 UP_ORBS = ("orb", "porb", "rorb")
 DASH_ORBS = ("dashorb", "gdashorb")       # green dash orb / magenta (gravity-flipping) one
-ORBS = UP_ORBS + ("dorb",) + DASH_ORBS
+ORBS = tuple(ORB_FX)
 PAD_ORB_COLOR = {"pad": (255, 230, 40), "orb": (255, 230, 40),
                  "ppad": (255, 120, 220), "porb": (255, 120, 220),
                  "rpad": (255, 70, 70), "rorb": (255, 70, 70),
                  "dpad": (80, 140, 255), "dorb": (80, 140, 255),
+                 "gpad": (255, 150, 40), "gorb": (255, 150, 40),
+                 "spad": (175, 95, 255), "sorb": (175, 95, 255),
                  "dashorb": (80, 255, 130), "gdashorb": (255, 80, 255)}
+for _c, _b in CLICK_PADS.items():
+    PAD_ORB_COLOR[_c] = PAD_ORB_COLOR[_b]
+
+
+def pad_base(kind):
+    """The plain pad a click pad works like ("cgpad" -> "gpad")."""
+    return CLICK_PADS.get(kind, kind)
+
+
+# Invisible blocks, spikes and slopes: their colour slot + INVISIBLE (so they keep
+# their colour).  Pads and orbs use their "flip" flag for invisible instead.
+INVISIBLE = 100
 DASH_MIN, DASH_MAX = 18, 120  # frames a dash lasts: at least DASH_MIN, longer while held
 SPEED_VALUES = (0.8, 1.0, 1.25, 1.5, 1.8)      # speed portal multipliers
 SPEED_COLOR = {0.8: (255, 170, 60), 1.0: (80, 170, 255), 1.25: (90, 230, 120),
@@ -389,9 +424,11 @@ class Obj:
             self.rect = pygame.Rect(x, y + 13, 26, 14)
         elif kind == "spike_l":    # base on the right, point to the left
             self.rect = pygame.Rect(x + 14, y + 13, 26, 14)
-        elif kind in UP_PADS:      # sits on the bottom of its cell, bounces you up
+        elif kind in CLICK_PADS:   # click pads: touch anywhere in the cell, then click
+            self.rect = pygame.Rect(x + 2, y, B - 4, B)
+        elif kind in PADS and kind not in TOP_PADS:   # sits on the bottom of its cell
             self.rect = pygame.Rect(x + 2, y + B - 10, B - 4, 10)
-        elif kind == "dpad":       # sits on the top of its cell, slams you down
+        elif kind in TOP_PADS:     # sits on the top of its cell, slams you down
             self.rect = pygame.Rect(x + 2, y, B - 4, 10)
         elif kind in ORBS:
             self.rect = pygame.Rect(x + 6, y + 6, 28, 28)
@@ -563,7 +600,24 @@ def _interp(pts, x):
 
 
 def clean_trigger(j):
-    """Validate a trigger's settings (from a file or the editor).  None = invalid."""
+    """Validate a trigger's settings (from a file or the editor).  None = invalid.
+    Every trigger can also have a box (box_w x box_h blocks, its bottom-left corner on
+    the trigger): then it only fires if you go through the box.  box_w 0 = the whole
+    column, like before."""
+    c = _clean_trigger(j)
+    if c is None:
+        return None
+    try:
+        w = int(float(j.get("box_w", 0)))
+        h = int(float(j.get("box_h", 1)))
+    except (TypeError, ValueError):
+        w, h = 0, 1
+    c["box_w"] = max(0, min(60, w))
+    c["box_h"] = max(1, min(EDIT_ROWS, h))
+    return c
+
+
+def _clean_trigger(j):
     if not isinstance(j, dict):
         return None
 
@@ -616,7 +670,10 @@ def clean_trigger(j):
                 "add": int(num("add", 1, -100, 100)),
                 "target": int(num("target", 3, -999, 999)),
                 "group": int(num("group", 1, 1, GROUP_MAX)),
-                "show": bool(j.get("show", True))}
+                "show": bool(j.get("show", True)),
+                # "passing": adds once when you pass it; "clicks": from then on, every
+                # click adds to the counter
+                "counts": "clicks" if j.get("counts") == "clicks" else "passing"}
     return None
 
 
@@ -825,7 +882,13 @@ class Level:
             if c["type"] in ("reveal", "count"):
                 first.setdefault(c["group"], c["show"])
         self.start_hidden = {g for g, show in first.items() if show}
-        self.trig_list = [(col * B, c, col, row) for col, row, c in trig]
+        # column triggers fire when you pass their column; box triggers only when you
+        # go through their box
+        self.trig_list = [(col * B, c, col, row) for col, row, c in trig
+                          if not c.get("box_w")]
+        self.box_trigs = [(pygame.Rect(col * B, FLOOR - (row + c["box_h"]) * B,
+                                       c["box_w"] * B, c["box_h"] * B), c, col, row)
+                          for col, row, c in trig if c.get("box_w")]
 
         self.groups = defaultdict(list)
         self.cols = defaultdict(list)
@@ -874,6 +937,8 @@ class Level:
         self.emitters = []       # running particle triggers: [x, y, cfg, frames left]
         self.spawned = []        # particles waiting to be picked up by the game
         self.pulses = []         # running pulse triggers: [cfg, rgb, frame]
+        self.click_counts = []   # count triggers counting clicks (after you passed them)
+        self.box_fired = set()   # box triggers that have fired this attempt
         self.next_trig = 0
         while self.next_trig < len(self.trig_list) and self.trig_list[self.next_trig][0] <= x:
             self.fire(*self.trig_list[self.next_trig][1:], instant=True)
@@ -937,10 +1002,10 @@ class Level:
             if not instant:
                 self._update_hidden()
         elif t == "count":
-            self.counters[cfg["item"]] += cfg["add"]
-            if self.counters[cfg["item"]] == cfg["target"]:
-                self.fire({"type": "reveal", "group": cfg["group"], "show": cfg["show"]},
-                          instant=instant)
+            if cfg.get("counts") == "clicks":
+                self.click_counts.append(cfg)          # counts from now on
+            else:
+                self.count(cfg, instant)
         elif t == "light":
             self.light.trigger(cfg, instant)
         elif t == "particle":
@@ -952,11 +1017,27 @@ class Level:
                 rgb = tuple(self.palette[cfg["color"] - 1])
                 self.pulses.append([cfg, rgb, 0])
 
+    def count(self, cfg, instant=False):
+        self.counters[cfg["item"]] += cfg["add"]
+        if self.counters[cfg["item"]] == cfg["target"]:
+            self.fire({"type": "reveal", "group": cfg["group"], "show": cfg["show"]},
+                      instant=instant)
+
+    def click(self):
+        """The player clicked: count triggers that count clicks add to their counters."""
+        for cfg in self.click_counts:
+            self.count(cfg)
+
     def update(self, x, y=None):
         """Advance triggers by one frame for a player at world (x, y)."""
         while self.next_trig < len(self.trig_list) and self.trig_list[self.next_trig][0] <= x:
             self.fire(*self.trig_list[self.next_trig][1:])
             self.next_trig += 1
+        if self.box_trigs and y is not None:
+            for i, (box, cfg, col, row) in enumerate(self.box_trigs):
+                if i not in self.box_fired and box.inflate(16, 16).collidepoint(x, y):
+                    self.box_fired.add(i)
+                    self.fire(cfg, col, row)
         if self.moves:
             keep = []
             for m in self.moves:
@@ -1242,7 +1323,7 @@ class LevelData:
         fin = j.get("finish")
         d.finish = int(fin) if isinstance(fin, int) else None
 
-        def cells_from(rows, kinds, out, colored=False):
+        def cells_from(rows, kinds, out, colored=False, invis_ok=False):
             for item in rows or []:
                 try:
                     c, r, k, f = item[:4]
@@ -1254,10 +1335,13 @@ class LevelData:
                 if k in kinds and 0 <= r < EDIT_ROWS and 0 <= c < MAX_COLS:
                     v = (k, bool(f), max(0, min(GROUP_MAX, g)))
                     if colored:
-                        v += (col if 0 <= col < COLOR_SLOTS else 0,)
+                        hidden = invis_ok and col >= INVISIBLE and k in COLORABLE
+                        col = col - INVISIBLE if col >= INVISIBLE else col
+                        v += ((col if 0 <= col < COLOR_SLOTS else 0)
+                              + (INVISIBLE if hidden else 0),)
                     out[(c, r)] = v
 
-        cells_from(j.get("cells"), CELL_KINDS, d.cells, colored=True)
+        cells_from(j.get("cells"), CELL_KINDS, d.cells, colored=True, invis_ok=True)
         pal = j.get("palette")
         if isinstance(pal, list) and len(pal) == len(DEFAULT_PALETTE):
             try:
@@ -2649,6 +2733,8 @@ class Player:
         self.trail = deque(maxlen=28)
         self.ceil = CEIL             # y of this level's ceiling (set on respawn)
         self.dash = 0                # frames into a dash-orb dash (0 = not dashing)
+        self.touching = frozenset()  # pads touched last frame (some only fire on arrival)
+        self.clicked = False         # the button was pressed this frame (click pads)
 
     @property
     def speed(self):
@@ -2694,6 +2780,7 @@ class Player:
         self.buffer = 0
         self.anim = 0
         self.used_orbs = frozenset()
+        self.touching = frozenset()
         self.coins = frozenset()
         self.set_mode(mode)
         if mode in ("cube", "robot", "ball", "spider"):
@@ -2722,6 +2809,29 @@ class Player:
             self.vy = (-power if up else power) * self.g
         self.on_ground = False
         self.robot_jumping = False
+
+    def pad_orb(self, fx, power, level):
+        """Do what a pad or orb does (see PAD_FX / ORB_FX)."""
+        self.robot_jumping = False
+        if fx in ("dash", "gdash"):
+            if fx == "gdash":
+                self.g = -self.g
+            self.vy = 0.0
+            self.dash = 1
+            self.on_ground = False
+            return
+        self.dash = 0
+        if fx == "up":
+            self.bounce(True, power)
+        elif fx == "down":
+            self.bounce(False, power)
+        elif fx == "grav":                    # flip gravity, pushed toward the new floor
+            self.g = -self.g
+            self.bounce(False, power)
+        elif fx == "spider":                  # just like a spider click
+            self.spider_teleport(level)
+            if self.mode == "wave":
+                self.wave_dir = 1
 
     # ---- per-mode controls -------------------------------------------------
     def clamp_fall(self, maxf):
@@ -2841,6 +2951,7 @@ class Player:
             self.enter_section(idx, game)
         mode = self.mode
         self.anim += 1
+        self.clicked = self.buffer > 0       # (before the game mode uses up the click)
         self.control(held, lv)
 
         # --- horizontal movement + side collisions -------------------------
@@ -2964,6 +3075,7 @@ class Player:
 
         # --- hazards & interactables ----------------------------------------
         r = self.rect()
+        now_touching = set()
         for o in near:
             k = o.kind
             if k in SPIKES:
@@ -2971,21 +3083,30 @@ class Player:
                     game.kill()
                     return
             elif k in PADS:
-                # pads fire whenever you touch them: yellow / pink / red bounce you up
-                # (normal / weaker / stronger), blue slams you down (they ignore you if
-                # you're already moving that way)
-                if r.colliderect(o.rect):
-                    up = k != "dpad"
-                    if mode == "wave":
-                        fire = self.wave_dir != (-1 if up else 1)
-                    elif up:
-                        fire = self.vy * self.g >= 0
-                    else:
-                        fire = self.vy * self.g < DPAD_V - 0.5
+                if not r.colliderect(o.rect):
+                    continue
+                key = (o.col, o.row)
+                now_touching.add(key)
+                fx, power = PAD_FX[pad_base(k)]
+                if k in CLICK_PADS:
+                    # click pads only work when you click while touching them
+                    fire = self.clicked
                     if fire:
-                        self.dash = 0
-                        self.bounce(up, JUMP_POWER[k] if up else DPAD_V)
-                        game.burst(o.rect.centerx, o.rect.centery, PAD_ORB_COLOR[k], 10)
+                        self.buffer = 0
+                elif fx in ("grav", "spider"):
+                    fire = key not in self.touching       # once each time you land on it
+                elif mode == "wave":
+                    # pads fire whenever you touch them - but they ignore you if you're
+                    # already going that way
+                    fire = self.wave_dir != (-1 if fx == "up" else 1)
+                elif fx == "up":
+                    fire = self.vy * self.g >= 0
+                else:
+                    fire = self.vy * self.g < DPAD_V - 0.5
+                if fire:
+                    self.clicked = False
+                    self.pad_orb(fx, power, lv)
+                    game.burst(o.rect.centerx, o.rect.centery, PAD_ORB_COLOR[k], 10)
             elif k == "coin":
                 key = (o.col, o.row)
                 if key not in self.coins and r.colliderect(o.rect):
@@ -2998,26 +3119,15 @@ class Player:
                 if r.colliderect(o.rect):
                     self.speed_mult = o.val
             elif k in ORBS:
-                # orbs fire automatically when you touch them (once per attempt):
-                # yellow / pink / red bounce you up (normal / weaker / stronger), blue
-                # slams you down, and dash orbs send you flying straight ahead for as
-                # long as you hold (the magenta one flips gravity first)
+                # orbs fire automatically when you touch them (once per attempt)
                 key = (o.col, o.row)
                 if (key not in self.used_orbs
                         and math.hypot(self.x - o.rect.centerx,
                                        self.y - o.rect.centery) < ORB_RADIUS):
                     self.used_orbs = self.used_orbs | {key}
-                    if k in DASH_ORBS:
-                        if k == "gdashorb":
-                            self.g = -self.g
-                        self.vy = 0.0
-                        self.dash = 1
-                        self.on_ground = False
-                        self.robot_jumping = False
-                    else:
-                        self.dash = 0
-                        self.bounce(k != "dorb", JUMP_POWER[k] if k != "dorb" else DORB_V)
+                    self.pad_orb(*ORB_FX[k], lv)
                     game.burst(o.rect.centerx, o.rect.centery, PAD_ORB_COLOR[k], 14)
+        self.touching = frozenset(now_touching)
 
         # --- visuals ---------------------------------------------------------
         if mode == "cube":
@@ -4109,6 +4219,12 @@ _DIRS = ("tl", "tr", "bl", "br")
 SLOPE_ROWS = [[("ramp_" + d, "1:1 " + d.upper()) for d in _DIRS]
               + [("gramp_" + d, "1:2 " + d.upper()) for d in _DIRS],
               [("sramp_" + d, "2:1 " + d.upper()) for d in _DIRS]]
+# pads and orbs in the palette: (kind, label).  "I-" = invisible, "C-" = click pad.
+_PAD_LABELS = [("pad", "PAD"), ("ppad", "PAD -"), ("rpad", "PAD +"), ("dpad", "PAD v"),
+               ("gpad", "PAD G"), ("spad", "PAD S")]
+_ORB_LABELS = [("orb", "ORB"), ("porb", "ORB -"), ("rorb", "ORB +"), ("dorb", "ORB v"),
+               ("gorb", "ORB G"), ("sorb", "ORB S"), ("dashorb", "DASH"),
+               ("gdashorb", "DASH G")]
 TAB_DEFS = {
     # layer -> [(tab name, [row 1 tools, row 2 tools]), ...]   tool = (id, label)
     "main": [
@@ -4116,12 +4232,12 @@ TAB_DEFS = {
                       ("spike_l", "SPIKE <"), ("spike_r", "SPIKE >"), ("coin", "COIN"),
                       ("text", "TEXT")], []]),
         ("SLOPES", SLOPE_ROWS),
-        ("PADS & ORBS", [[("pad", "PAD"), ("dpad", "PAD v"), ("orb", "ORB"), ("dorb", "ORB v"),
-                          ("ipad", "I-PAD"), ("idpad", "I-PAD v"), ("iorb", "I-ORB"),
-                          ("idorb", "I-ORB v")],
-                         [("ppad", "PAD -"), ("rpad", "PAD +"), ("porb", "ORB -"),
-                          ("rorb", "ORB +"), ("dashorb", "DASH"), ("gdashorb", "DASH G"),
-                          ("idashorb", "I-DASH"), ("igdashorb", "I-DASH G")]]),
+        ("PADS", [[(k, l) for k, l in _PAD_LABELS],
+                  [("i" + k, "I-" + l) for k, l in _PAD_LABELS]]),
+        ("ORBS", [[(k, l) for k, l in _ORB_LABELS],
+                  [("i" + k, "I-" + l) for k, l in _ORB_LABELS]]),
+        ("CLICK PADS", [[("c" + k, "C-" + l) for k, l in _PAD_LABELS],
+                        [("ic" + k, "IC-" + l) for k, l in _PAD_LABELS]]),
         ("PORTALS", [[("portal:" + m, m.upper()) for m in MODE_ORDER],
                      [("portal:miniwave", "MINI WAVE"), ("finish", "FINISH"),
                       ("grav_d", "GRAV v"), ("grav_u", "GRAV ^")]]),
@@ -4156,11 +4272,16 @@ TOOL_HELP = {
     "trig:pulse": "Pulse trigger - flashes the screen, or a group, a colour",
     "trig:rotate": "Rotate trigger - spins a group (around itself or another group)",
     "trig:count": "Count trigger - adds to a counter; at the target it reveals / hides a group",
+    "pad": "Yellow pad - bounces you up", "dpad": "Blue pad - slams you down",
     "ppad": "Pink pad - a weaker jump pad", "rpad": "Red pad - a stronger jump pad",
+    "gpad": "Gravity pad - flips gravity and sends you to the other side",
+    "spad": "Spider pad - teleports you to the opposite surface, like a spider click",
+    "orb": "Yellow orb - bounces you up", "dorb": "Blue orb - slams you down",
     "porb": "Pink orb - a weaker jump orb", "rorb": "Red orb - a stronger jump orb",
+    "gorb": "Gravity orb - flips gravity and sends you to the other side",
+    "sorb": "Spider orb - teleports you to the opposite surface, like a spider click",
     "dashorb": "Dash orb - fly straight ahead while you hold",
     "gdashorb": "Gravity dash orb - flips gravity, then dashes straight ahead",
-    "idashorb": "Invisible dash orb", "igdashorb": "Invisible gravity dash orb",
     "select": "Select: drag an area, then Ctrl+C / X / V, DELETE, G = set group",
     "color": "Colour for new background blocks (with a selection: recolours it)."
              "  Right-click to edit",
@@ -4176,6 +4297,12 @@ TOOL_HELP = {
 # tool -> (cell kind, flip flag).  For pads and orbs the flag means "invisible".
 _WHERE = {"tl": "ceiling, low on the left", "tr": "ceiling, low on the right",
           "bl": "floor, going down", "br": "floor, going up"}
+for _k in list(PAD_FX) + list(ORB_FX):
+    _h = TOOL_HELP.get(_k, _k)
+    TOOL_HELP["i" + _k] = "Invisible: " + _h[0].lower() + _h[1:]
+    if _k in PAD_FX:
+        TOOL_HELP["c" + _k] = "Click " + _h[0].lower() + _h[1:] + " - only if you click on it"
+        TOOL_HELP["ic" + _k] = "Invisible click " + _h[0].lower() + _h[1:]
 for _d in _DIRS:
     TOOL_HELP["ramp_" + _d] = "45-degree slope (1 block) - " + _WHERE[_d]
     TOOL_HELP["gramp_" + _d] = "Gentle slope 1/2 (2 wide, 1 tall) - " + _WHERE[_d]
@@ -4183,19 +4310,15 @@ for _d in _DIRS:
 TOOL_CELL = {
     "block": ("block", False), "spike": ("spike", False), "spike_d": ("spike", True),
     "spike_l": ("spike_l", False), "spike_r": ("spike_r", False),
-    "pad": ("pad", False), "dpad": ("dpad", False), "orb": ("orb", False),
-    "dorb": ("dorb", False),
-    "ipad": ("pad", True), "idpad": ("dpad", True), "iorb": ("orb", True),
-    "idorb": ("dorb", True), "coin": ("coin", False),
-    "ppad": ("ppad", False), "rpad": ("rpad", False), "porb": ("porb", False),
-    "rorb": ("rorb", False), "dashorb": ("dashorb", False), "gdashorb": ("gdashorb", False),
-    "idashorb": ("dashorb", True), "igdashorb": ("gdashorb", True),
+    "coin": ("coin", False),
 }
+for _k in PADS + ORBS:                  # every pad and orb, and an invisible version
+    TOOL_CELL[_k] = (_k, False)
+    TOOL_CELL["i" + _k] = (_k, True)
 for _k in RAMPS:
     TOOL_CELL[_k] = (_k, False)
 CELL_TOOLS = tuple(TOOL_CELL)
-GHOST_BASE = {"ipad": "pad", "idpad": "dpad", "iorb": "orb", "idorb": "dorb",
-              "idashorb": "dashorb", "igdashorb": "gdashorb"}
+GHOST_BASE = {"i" + k: k for k in PADS + ORBS}     # invisible tool -> the visible one
 PORTAL_MIN_COL = 4
 TRIG_COLOR = {"move": (110, 255, 160), "reveal": (255, 150, 255), "light": (255, 235, 120),
               "particle": (255, 170, 90), "pulse": (255, 110, 170), "rotate": (120, 200, 255),
@@ -4215,6 +4338,7 @@ TOP_BUTTONS = {            # name -> rect (top bar)
     "layer": pygame.Rect(604, 5, 76, 30),
     "play": pygame.Rect(684, 5, 50, 30),
     "here": pygame.Rect(738, 5, 88, 30),
+    "invis": pygame.Rect(830, 5, 78, 30),
 }
 SIDE_BUTTONS = {
     "select": pygame.Rect(778, FLOOR + 31, 58, 28),
@@ -4262,12 +4386,22 @@ def pal_rect(i, row, n=8):
     return pygame.Rect(8 + i * step, FLOOR + 31 + row * 31, step - 4, 28)
 
 
-def etab_rect(i):
-    return pygame.Rect(8 + i * 112, FLOOR + 5, 108, 22)
+def etab_rect(i, n=6):
+    """Palette tab i of n (more tabs get narrower)."""
+    step = min(112, 752 // max(1, n))
+    return pygame.Rect(8 + i * step, FLOOR + 5, step - 4, 22)
+
+
+BOX_FIELDS = [("box_w", "Box width (0 = the whole column)", "int", (0, 60, 1)),
+              ("box_h", "Box height (blocks, from here up)", "int", (1, EDIT_ROWS, 1))]
 
 
 def trigger_fields(cfg):
     """The editable fields of a trigger: (key, label, kind, extra)."""
+    return _trigger_fields(cfg) + BOX_FIELDS
+
+
+def _trigger_fields(cfg):
     t = cfg["type"]
     if t == "move":
         return [("group", "Group", "int", (1, GROUP_MAX, 1)),
@@ -4306,7 +4440,9 @@ def trigger_fields(cfg):
                 ("ease", "Easing", "choice", [(True, "Smooth"), (False, "Linear")])]
     if t == "count":
         return [("item", "Counter (item id)", "int", (1, COUNTER_MAX, 1)),
-                ("add", "Add to it (- takes away)", "int", (-100, 100, 1)),
+                ("counts", "Counts", "choice", [("passing", "Passing this trigger"),
+                                                ("clicks", "Every click after it")]),
+                ("add", "Add each time (- takes away)", "int", (-100, 100, 1)),
                 ("target", "When it reaches", "int", (-999, 999, 1)),
                 ("group", "Group", "int", (1, GROUP_MAX, 1)),
                 ("show", "Then", "choice", [(True, "Reveal the group"),
@@ -4314,6 +4450,38 @@ def trigger_fields(cfg):
     return [("effect", "Effect", "choice", [(e, LIGHT_NAMES[e]) for e in LIGHT_EFFECTS]),
             ("radius", "Circle radius (blocks)", "float", (1, 12, 0.5)),
             ("time", "Time (seconds)", "float", (0, 10, 0.1))]
+
+
+def orb_mark(s, kind, cx, cy, colr, k=1.0):
+    """The symbol in the middle of an orb (what it does)."""
+    fx = ORB_FX[kind][0]
+    if fx in ("dash", "gdash"):                         # straight ahead
+        pygame.draw.lines(s, (20, 20, 30), False, [(cx - 4 * k, cy - 6 * k), (cx + 3 * k, cy),
+                                                   (cx - 4 * k, cy + 6 * k)], 3)
+    elif fx == "grav":                                  # up and down arrows
+        for d in (-1, 1):
+            pygame.draw.polygon(s, colr, [(cx - 4 * k, cy + 2 * d * k), (cx + 4 * k, cy + 2 * d * k),
+                                          (cx, cy + 7 * d * k)])
+    elif fx == "spider":                                # a diamond
+        pygame.draw.polygon(s, colr, [(cx, cy - 6 * k), (cx + 5 * k, cy), (cx, cy + 6 * k),
+                                      (cx - 5 * k, cy)], 2)
+    else:                                               # the bounce direction
+        d = 1 if fx == "down" else -1
+        pygame.draw.polygon(s, colr, [(cx - 5 * k, cy - 3 * d * k), (cx + 5 * k, cy - 3 * d * k),
+                                      (cx, cy + 4 * d * k)])
+
+
+def pad_mark(s, kind, cx, cy, k=1.0):
+    """Gravity and spider pads get a small symbol over them."""
+    fx = PAD_FX[kind][0]
+    if fx == "grav":
+        for d in (-1, 1):
+            pygame.draw.polygon(s, (255, 255, 255), [(cx - 4 * k, cy + 2 * d * k),
+                                                     (cx + 4 * k, cy + 2 * d * k),
+                                                     (cx, cy + 6 * d * k)])
+    elif fx == "spider":
+        pygame.draw.polygon(s, (255, 255, 255), [(cx, cy - 5 * k), (cx + 4 * k, cy),
+                                                 (cx, cy + 5 * k), (cx - 4 * k, cy)], 1)
 
 
 class Editor:
@@ -4329,6 +4497,7 @@ class Editor:
         self.group = 0               # group given to newly placed objects (0 = none)
         self.bg_color = 0            # colour for new background blocks (0 = automatic)
         self.obj_color = 0           # colour for new main-layer blocks / spikes / ramps
+        self.invis = False           # INVIS: new main-layer objects are invisible in play
         self.cedit = None            # colour slot being edited: {"slot", "rgb", "sel"}
         self.undo, self.redo = [], []
         self.drag = None
@@ -4428,7 +4597,7 @@ class Editor:
             if self.layer == "bg":
                 self.data.bg[(col, row)] = (kind, flip, self.group, self.bg_color)
             else:
-                colr = self.obj_color if kind in COLORABLE else 0
+                kind, flip, colr = self.placed(kind, flip)
                 self.data.cells[(col, row)] = (kind, flip, self.group, colr)
         elif not first:
             return
@@ -4451,6 +4620,44 @@ class Editor:
         elif tool.startswith("portal:"):
             if col >= PORTAL_MIN_COL:
                 d.portals[col] = tool.split(":")[1]
+
+    def placed(self, kind, flip):
+        """(kind, flip, colour) for a main-layer object about to be placed: the chosen
+        colour, and invisible while INVIS is on."""
+        colr = self.obj_color if kind in COLORABLE else 0
+        if self.invis:
+            if kind in COLORABLE:
+                colr += INVISIBLE
+            elif kind in PADS + ORBS:
+                flip = True
+        return kind, flip, colr
+
+    def toggle_invis(self):
+        """INVIS (or I): with a selection, hide / show the selected blocks, spikes, slopes,
+        pads and orbs in play; otherwise switch invisible placing on / off."""
+        items = [it for it in self.selected() if it[0] == "cell"
+                 and (it[3][0] in COLORABLE or it[3][0] in PADS + ORBS)] \
+            if self.sel and self.layer == "main" else []
+        if not items:
+            self.invis = not self.invis
+            self.say("INVIS on: what you place now is invisible while playing" if self.invis
+                     else "INVIS off: objects you place can be seen")
+            return
+
+        def hidden(v):
+            return v[3] >= INVISIBLE if v[0] in COLORABLE else v[1]
+        hide = not all(hidden(v) for _, _, _, v in items)
+        self.push_undo()
+        for _, c, r, v in items:
+            kind, flip, grp, colr = v
+            if kind in COLORABLE:
+                colr = colr % INVISIBLE + (INVISIBLE if hide else 0)
+            else:
+                flip = hide
+            self.data.cells[(c, r)] = (kind, flip, grp, colr)
+        self.invis = hide
+        self.dirty = True
+        self.say("%d objects made %s" % (len(items), "invisible" if hide else "visible"))
 
     @staticmethod
     def covering(cells, col, row):
@@ -4785,13 +4992,15 @@ class Editor:
 
     def props_geom(self):
         n = len(trigger_fields(self.form["cfg"]))
-        box = pygame.Rect(0, 0, 640, 120 + n * 40)
+        step = 40 if n <= 8 else 37                 # (lots of settings: a bit closer)
+        box = pygame.Rect(0, 0, 640, 112 + n * step)
         box.center = (W // 2, H // 2)
         rows = []
         for i in range(n):
-            r = pygame.Rect(box.x + 20, box.y + 62 + i * 40, box.w - 40, 34)
-            rows.append((r, pygame.Rect(r.right - 186, r.y + 3, 30, 28),
-                         pygame.Rect(r.right - 34, r.y + 3, 30, 28)))
+            r = pygame.Rect(box.x + 20, box.y + 58 + i * step, box.w - 40, step - 5)
+            bh = min(28, r.h - 4)                  # (room for choices like "Every click
+            rows.append((r, pygame.Rect(r.right - 256, r.y + 2, 30, bh),   # after it")
+                         pygame.Rect(r.right - 34, r.y + 2, 30, bh)))
         return box, rows
 
     def props_delete_rect(self):
@@ -5277,6 +5486,8 @@ class Editor:
             self.sel = (0, 0, max(self.data.last_col(), 1), max(ROWS - 1, self.data.top_row()))
         elif k in (pygame.K_DELETE, pygame.K_BACKSPACE):
             self.delete_key()
+        elif k == pygame.K_i:
+            self.toggle_invis()
         elif k == pygame.K_e:
             self.set_tool("erase")
         elif k == pygame.K_v:
@@ -5333,6 +5544,8 @@ class Editor:
             self.playtest(here=False)
         elif TOP_BUTTONS["here"].collidepoint(pos):
             self.playtest(here=True)
+        elif TOP_BUTTONS["invis"].collidepoint(pos):
+            self.toggle_invis()
 
     def swatches_shown(self):
         return self.tab[self.layer] == 0        # OBJECTS / BACKGROUND tab
@@ -5349,8 +5562,9 @@ class Editor:
         if items:
             self.push_undo()
             for kind, c, r, v in items:
+                hid = INVISIBLE if (kind == "cell" and v[3] >= INVISIBLE) else 0
                 (self.data.bg if kind == "bg" else self.data.cells)[(c, r)] = \
-                    (v[0], v[1], v[2], i)
+                    (v[0], v[1], v[2], i + hid)          # (invisible ones stay invisible)
             self.dirty = True
             self.say("Recoloured %d objects" % len(items))
 
@@ -5503,7 +5717,7 @@ class Editor:
                 self.say("Background theme: " + dict(THEMES)[self.data.theme])
                 return
         for i in range(len(self.tabs())):
-            if etab_rect(i).collidepoint(pos):
+            if etab_rect(i, len(self.tabs())).collidepoint(pos):
                 self.tab[self.layer] = i
                 return
         for row, pal in enumerate(self.cur_tab()):
@@ -5632,21 +5846,17 @@ class Editor:
         elif tool in GHOST_BASE:           # invisible variants: the icon plus a dashed box
             self.draw_icon(GHOST_BASE[tool], cx, cy)
             draw_dashed_rect(s, pygame.Rect(cx - 13, cy - 12, 26, 24), (255, 255, 255), 4, 3, 1)
-        elif tool in UP_PADS:
-            pygame.draw.ellipse(s, PAD_ORB_COLOR[tool], (cx - 12, cy + 2, 24, 10))
-        elif tool == "dpad":
-            pygame.draw.ellipse(s, (80, 140, 255), (cx - 12, cy - 12, 24, 10))
-        elif tool in DASH_ORBS:
-            pygame.draw.circle(s, PAD_ORB_COLOR[tool], (cx, cy), 7)
-            pygame.draw.circle(s, (255, 255, 255), (cx, cy), 12, 2)
-            pygame.draw.lines(s, (20, 20, 30), False, [(cx - 3, cy - 4), (cx + 2, cy),
-                                                       (cx - 3, cy + 4)], 2)
+        elif tool in PADS:
+            colr = PAD_ORB_COLOR[tool]
+            top = tool in TOP_PADS
+            pygame.draw.ellipse(s, colr, (cx - 12, cy - 12 if top else cy + 2, 24, 10))
+            pad_mark(s, pad_base(tool), cx, cy - 3 if not top else cy + 4, 0.7)
+            if tool in CLICK_PADS:                    # click pads: a "tap" ring
+                pygame.draw.circle(s, (255, 255, 255), (cx, cy + (8 if top else -8)), 4, 1)
         elif tool in ORBS:
             pygame.draw.circle(s, PAD_ORB_COLOR[tool], (cx, cy), 7)
             pygame.draw.circle(s, (255, 255, 255), (cx, cy), 12, 2)
-            d = 1 if tool == "dorb" else -1
-            pygame.draw.polygon(s, (255, 255, 255),
-                                [(cx - 4, cy - 2 * d), (cx + 4, cy - 2 * d), (cx, cy + 3 * d)])
+            orb_mark(s, tool, cx, cy, (255, 255, 255), 0.8)
         elif tool.startswith("speed:"):
             v = float(tool.split(":")[1])
             colr = SPEED_COLOR[v]
@@ -5683,8 +5893,16 @@ class Editor:
         t = cfg["type"]
         colr = TRIG_COLOR[t]
         x = c * B - cam
-        for yy in range(CEIL, FLOOR, 12):          # where it fires
-            pygame.draw.line(s, tuple(v // 2 for v in colr), (x, yy), (x, yy + 5), 1)
+        if cfg.get("box_w"):                       # it fires only inside its box
+            bw, bh = cfg["box_w"], cfg["box_h"]
+            box = pygame.Rect(int(x), int(self.row_y(r + bh - 1)), bw * B, bh * B)
+            veil = pygame.Surface(box.size, pygame.SRCALPHA)
+            veil.fill(colr + (28,))
+            s.blit(veil, box.topleft)
+            draw_dashed_rect(s, box, colr, 6, 4, 2)
+        else:
+            for yy in range(CEIL, FLOOR, 12):      # where it fires: the whole column
+                pygame.draw.line(s, tuple(v // 2 for v in colr), (x, yy), (x, yy + 5), 1)
         cx, cy = int(x + B / 2), int(self.row_y(r) + B // 2)
         tool = "trig:" + t if t != "light" else "light:" + cfg["effect"]
         self.draw_icon(tool, cx, cy)
@@ -5729,8 +5947,9 @@ class Editor:
                 draw_dashed_rect(g.screen, pygame.Rect(int(c * B - cam), int(self.row_y(r)),
                                                       B, B), (200, 200, 255), 3, 3, 1)
                 self.draw_group_tag(grp, c * B - cam, self.row_y(r))
-        for (c, r), cfg in d.triggers.items():
-            if lo <= c <= hi and rlo <= r <= rhi:
+        for (c, r), cfg in d.triggers.items():       # (a box can reach into the view)
+            if (lo - cfg.get("box_w", 0) <= c <= hi
+                    and rlo - (cfg.get("box_h", 1) if cfg.get("box_w") else 0) <= r <= rhi):
                 self.draw_trigger(c, r, cfg, cam)
 
     def draw(self):
@@ -5860,9 +6079,11 @@ class Editor:
                 draw_dashed_rect(s, box, (120, 255, 160), 7, 4, 2)
             elif tool in CELL_TOOLS:
                 kind, flip = TOOL_CELL[tool]
-                g.draw_obj(Obj(kind, col, row, flip=flip,
-                               color=self.bg_color if self.layer == "bg"
-                               else self.obj_color if kind in COLORABLE else 0), cam, acc,
+                if self.layer == "bg":
+                    colr = self.bg_color
+                else:
+                    kind, flip, colr = self.placed(kind, flip)
+                g.draw_obj(Obj(kind, col, row, flip=flip, color=colr), cam, acc,
                            layer="bg" if self.layer == "bg" else "main")
                 pygame.draw.rect(s, (255, 255, 255), r, 2)
             elif tool == "erase":
@@ -5886,7 +6107,7 @@ class Editor:
         pygame.draw.rect(s, (14, 16, 36), (0, FLOOR + 2, W, H - FLOOR - 2))
         hover_tool = None
         for i, (name, _) in enumerate(self.tabs()):
-            r = etab_rect(i)
+            r = etab_rect(i, len(self.tabs()))
             on = i == self.tab[self.layer]
             pygame.draw.rect(s, (40, 46, 90) if on else (18, 21, 46), r, border_radius=6)
             pygame.draw.rect(s, (255, 230, 90) if on else (60, 68, 120), r, 2, border_radius=6)
@@ -5970,6 +6191,8 @@ class Editor:
                          color=(255, 230, 90))
         self.draw_button(TOP_BUTTONS["play"], "PLAY", color=(90, 230, 120))
         self.draw_button(TOP_BUTTONS["here"], "PLAY HERE", color=(90, 230, 120))
+        self.draw_button(TOP_BUTTONS["invis"], "INVIS", active=self.invis,
+                         color=(255, 230, 90))
 
         if self.toast_t > 0:
             t = g.font.render(self.toast, True, (255, 255, 255))
@@ -8157,6 +8380,11 @@ class Game:
         for dx in (-5, 3):
             pygame.draw.rect(self.screen, (230, 232, 245), (r.centerx + dx, r.y + 7, 4, r.h - 14))
 
+    def play_click(self):
+        """A click while playing (count triggers can count them)."""
+        if self.player.alive and not self.finished and not self.input_lock:
+            self.level.click()
+
     def play_event(self, e):
         if self.paused:
             self.pause_event(e)
@@ -8166,6 +8394,7 @@ class Game:
                 self.pause()
                 return
             self.player.buffer = BUFFER_FRAMES
+            self.play_click()
         if e.type == pygame.KEYDOWN:
             if e.key == pygame.K_ESCAPE:
                 if self.finished:
@@ -8174,6 +8403,7 @@ class Game:
                     self.pause()
             elif e.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w):
                 self.player.buffer = BUFFER_FRAMES
+                self.play_click()
             elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and self.finished:
                 self.back_from_play()
             elif e.key == pygame.K_p:
@@ -9269,7 +9499,10 @@ class Game:
         sx = o.col * B + o.ox - cam
         sy = int(FLOOR - (o.row + 1) * B + o.oy + self.camy)
         k = o.kind if not o.ang else o.base_kind      # (rotated: drawn turned, below)
-        ghost = o.flip and k in PADS + ORBS                 # an invisible object
+        # an invisible object: pads / orbs with their flag, blocks / spikes / slopes with
+        # INVISIBLE added to their colour
+        ghost = (o.flip and k in PADS + ORBS) or (o.color >= INVISIBLE and k in COLORABLE)
+        color = o.color % INVISIBLE                         # (the colour it keeps)
         if ghost and self.state != "editor":
             k = None          # never drawn while playing (hitboxes mode still shows it)
         tint = self.tints.get(o.group) if (o.group and self.state == "play") else None
@@ -9308,8 +9541,8 @@ class Game:
                 pygame.draw.polygon(s, fill, turned(ramp_points(k, int(sx), sy - (h - 1) * B,
                                                                 w * B, h * B)))
             return
-        if o.color and k in COLORABLE:                 # an object with its own colour
-            line = slot_color(self.palette, o.color, acc)
+        if color and k in COLORABLE:                   # an object with its own colour
+            line = slot_color(self.palette, color, acc)
             fillc = tuple(int(v * 0.18) + 8 for v in line)
         else:
             line, fillc = acc, (12, 14, 32)
@@ -9344,16 +9577,21 @@ class Game:
                                         (cx - wd // 4, cy - 7, max(2, wd // 2), 14), 2)
         elif k in SPIKES:
             pts = turned(spike_points(k, sx, sy, o.flip))
-            colored = (o.color and line is not acc) or tint
+            colored = (color and line is not acc) or tint
             pygame.draw.polygon(s, fillc if colored else (6, 6, 14), pts)
             pygame.draw.polygon(s, line if colored else (255, 255, 255), pts, 2)
-        elif k in UP_PADS:
+        elif k in PADS:
             colr = PAD_ORB_COLOR[k]
-            pygame.draw.ellipse(s, colr, (sx + 3, sy + B - 12, B - 6, 14))
-            pygame.draw.ellipse(s, (255, 255, 255), (sx + 3, sy + B - 12, B - 6, 14), 2)
-        elif k == "dpad":
-            pygame.draw.ellipse(s, (80, 140, 255), (sx + 3, sy - 2, B - 6, 14))
-            pygame.draw.ellipse(s, (255, 255, 255), (sx + 3, sy - 2, B - 6, 14), 2)
+            top = k in TOP_PADS
+            py = sy - 2 if top else sy + B - 12
+            pygame.draw.ellipse(s, colr, (sx + 3, py, B - 6, 14))
+            pygame.draw.ellipse(s, (255, 255, 255), (sx + 3, py, B - 6, 14), 2)
+            mark_y = sy + 20 if top else sy + B - 20
+            pad_mark(s, pad_base(k), int(sx + B / 2), mark_y)
+            if k in CLICK_PADS:                       # click pads: a pulsing "tap" ring
+                ring = 6 + int(2 * math.sin(pygame.time.get_ticks() * 0.008))
+                pygame.draw.circle(s, colr, (int(sx + B / 2), sy + (B - 10 if top else 10)),
+                                   ring, 2)
         elif k in ORBS:
             cx, cy = int(sx + B / 2), sy + B // 2
             used = (o.col, o.row) in self.player.used_orbs and self.state == "play"
@@ -9364,13 +9602,7 @@ class Game:
             white = (255, 255, 255) if not used else (140, 140, 140)
             pygame.draw.circle(s, col, (cx, cy), 11)
             pygame.draw.circle(s, white, (cx, cy), pulse, 2)
-            if k in DASH_ORBS:                     # a chevron: straight ahead
-                pygame.draw.lines(s, (20, 20, 30), False,
-                                  [(cx - 4, cy - 6), (cx + 3, cy), (cx - 4, cy + 6)], 3)
-            else:
-                d = 1 if k == "dorb" else -1          # arrow shows the bounce direction
-                pygame.draw.polygon(s, white, [(cx - 5, cy - 3 * d), (cx + 5, cy - 3 * d),
-                                               (cx, cy + 4 * d)])
+            orb_mark(s, k, cx, cy, white)
         elif k in ("speed", "grav"):
             top = int(self.view_ceil + self.camy)
             r = pygame.Rect(0, 0, 26, FLOOR - self.view_ceil)
@@ -9397,7 +9629,9 @@ class Game:
                 pygame.draw.polygon(s, colr, [(cx - 8, cy - 8 * d), (cx + 8, cy - 8 * d),
                                               (cx, cy + 10 * d)])
         if ghost and self.state == "editor":
-            draw_dashed_rect(s, pygame.Rect(int(sx), sy, B, B), (255, 255, 255), 5, 4, 1)
+            w, h = ramp_size(k) if k in RAMPS else (1, 1)
+            draw_dashed_rect(s, pygame.Rect(int(sx), sy - (h - 1) * B, w * B, h * B),
+                             (255, 255, 255), 5, 4, 1)
         if self.show_hitboxes and k != "block":
             pygame.draw.rect(s, (255, 60, 60), o.rect.move(-int(cam), int(self.camy)), 1)
 
