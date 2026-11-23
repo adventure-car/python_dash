@@ -97,7 +97,8 @@ Extras (all trigger just by touching them - no button needed, in EVERY mode):
   green dash orb            fly straight ahead while you hold (magenta: flips gravity first)
   orange pad / orange orb   flip gravity         purple pad / purple orb  teleport to the
                                                  opposite surface, like a spider click
-  click pads                the same pads, but they only work if you click on them
+  click pads / click orbs   the same pads and orbs, but they only work if you click on them
+  upside-down pads          the same pads, on the ceiling side - for flipped gravity
   gravity portals  flip gravity      speed portals  0.8x 1x 1.25x 1.5x 1.8x
   slopes           45-degree (1x1), gentle 1:2 (2 wide) and steep 2:1 (2 tall), facing any
                    way - run up / down them (deadly to the wave)
@@ -106,7 +107,8 @@ Extras (all trigger just by touching them - no button needed, in EVERY mode):
 
 Level editor
 ------------
-  The palette has tabs:  OBJECTS  SLOPES  PADS  ORBS  CLICK PADS  PORTALS  SPEED  TRIGGERS
+  The palette has tabs:  OBJECTS  SLOPES  PADS  ORBS  CLICK PADS  UPSIDE PADS  CLICK ORBS
+                         PORTALS  SPEED  TRIGGERS
   (every pad and orb has an invisible "I-" version)
   (TAB / Shift+TAB)
   Left click / drag   place            Right click / drag  erase
@@ -212,14 +214,20 @@ PAD_FX = {"pad": ("up", PAD_V), "ppad": ("up", 11.5), "rpad": ("up", 20.5),
 ORB_FX = {"orb": ("up", ORB_V), "porb": ("up", 9.0), "rorb": ("up", 16.0),
           "dorb": ("down", DORB_V), "gorb": ("grav", GRAV_KICK), "sorb": ("spider", 0),
           "dashorb": ("dash", 0), "gdashorb": ("gdash", 0)}
-# Click pads: the same pads, but they only work if you click while touching them.
+# Click pads / orbs: the same pads and orbs, but they only work if you click while
+# touching them.  Upside-down pads ("..._u") work just like the normal ones but sit on
+# the other side of their cell, drawn flipped - for when gravity is upside down.
 CLICK_PADS = {"c" + k: k for k in PAD_FX}           # "cpad" -> "pad", ...
+CLICK_ORBS = {"c" + k: k for k in ORB_FX}           # "corb" -> "orb", ...
+_PLAIN_PADS = list(PAD_FX) + list(CLICK_PADS)
+UPSIDE_PADS = {k + "_u": k for k in _PLAIN_PADS}     # "pad_u" -> "pad", "cpad_u" -> "cpad"
 UP_PADS = ("pad", "ppad", "rpad")
-TOP_PADS = ("dpad", "cdpad")                         # (sit on the top of their cell)
-PADS = tuple(PAD_FX) + tuple(CLICK_PADS)
+PADS = tuple(_PLAIN_PADS) + tuple(UPSIDE_PADS)
+CLICK_KINDS = (set(CLICK_PADS) | set(CLICK_ORBS)
+               | {k for k, b in UPSIDE_PADS.items() if b in CLICK_PADS})
 UP_ORBS = ("orb", "porb", "rorb")
 DASH_ORBS = ("dashorb", "gdashorb")       # green dash orb / magenta (gravity-flipping) one
-ORBS = tuple(ORB_FX)
+ORBS = tuple(ORB_FX) + tuple(CLICK_ORBS)
 PAD_ORB_COLOR = {"pad": (255, 230, 40), "orb": (255, 230, 40),
                  "ppad": (255, 120, 220), "porb": (255, 120, 220),
                  "rpad": (255, 70, 70), "rorb": (255, 70, 70),
@@ -227,13 +235,27 @@ PAD_ORB_COLOR = {"pad": (255, 230, 40), "orb": (255, 230, 40),
                  "gpad": (255, 150, 40), "gorb": (255, 150, 40),
                  "spad": (175, 95, 255), "sorb": (175, 95, 255),
                  "dashorb": (80, 255, 130), "gdashorb": (255, 80, 255)}
-for _c, _b in CLICK_PADS.items():
+for _c, _b in list(CLICK_PADS.items()) + list(CLICK_ORBS.items()):
     PAD_ORB_COLOR[_c] = PAD_ORB_COLOR[_b]
+for _u, _b in UPSIDE_PADS.items():
+    PAD_ORB_COLOR[_u] = PAD_ORB_COLOR[_b]
 
 
 def pad_base(kind):
-    """The plain pad a click pad works like ("cgpad" -> "gpad")."""
+    """The plain pad a pad works like ("cgpad_u" -> "gpad")."""
+    kind = UPSIDE_PADS.get(kind, kind)
     return CLICK_PADS.get(kind, kind)
+
+
+def orb_base(kind):
+    """The plain orb an orb works like ("cgorb" -> "gorb")."""
+    return CLICK_ORBS.get(kind, kind)
+
+
+def pad_on_top(kind):
+    """True for pads that sit on the top of their cell: the blue pad, and the upside-down
+    versions of all the others."""
+    return (pad_base(kind) == "dpad") != (kind in UPSIDE_PADS)
 
 
 # Invisible blocks, spikes and slopes: their colour slot + INVISIBLE (so they keep
@@ -424,11 +446,11 @@ class Obj:
             self.rect = pygame.Rect(x, y + 13, 26, 14)
         elif kind == "spike_l":    # base on the right, point to the left
             self.rect = pygame.Rect(x + 14, y + 13, 26, 14)
-        elif kind in CLICK_PADS:   # click pads: touch anywhere in the cell, then click
+        elif kind in PADS and kind in CLICK_KINDS:   # click pads: anywhere in the cell
             self.rect = pygame.Rect(x + 2, y, B - 4, B)
-        elif kind in PADS and kind not in TOP_PADS:   # sits on the bottom of its cell
+        elif kind in PADS and not pad_on_top(kind):   # sits on the bottom of its cell
             self.rect = pygame.Rect(x + 2, y + B - 10, B - 4, 10)
-        elif kind in TOP_PADS:     # sits on the top of its cell, slams you down
+        elif kind in PADS:         # sits on the top of its cell
             self.rect = pygame.Rect(x + 2, y, B - 4, 10)
         elif kind in ORBS:
             self.rect = pygame.Rect(x + 6, y + 6, 28, 28)
@@ -3088,7 +3110,7 @@ class Player:
                 key = (o.col, o.row)
                 now_touching.add(key)
                 fx, power = PAD_FX[pad_base(k)]
-                if k in CLICK_PADS:
+                if k in CLICK_KINDS:
                     # click pads only work when you click while touching them
                     fire = self.clicked
                     if fire:
@@ -3123,9 +3145,13 @@ class Player:
                 key = (o.col, o.row)
                 if (key not in self.used_orbs
                         and math.hypot(self.x - o.rect.centerx,
-                                       self.y - o.rect.centery) < ORB_RADIUS):
+                                       self.y - o.rect.centery) < ORB_RADIUS
+                        and (k not in CLICK_KINDS or self.clicked)):    # (click orbs)
+                    if k in CLICK_KINDS:
+                        self.buffer = 0
+                        self.clicked = False
                     self.used_orbs = self.used_orbs | {key}
-                    self.pad_orb(*ORB_FX[k], lv)
+                    self.pad_orb(*ORB_FX[orb_base(k)], lv)
                     game.burst(o.rect.centerx, o.rect.centery, PAD_ORB_COLOR[k], 14)
         self.touching = frozenset(now_touching)
 
@@ -4238,6 +4264,11 @@ TAB_DEFS = {
                   [("i" + k, "I-" + l) for k, l in _ORB_LABELS]]),
         ("CLICK PADS", [[("c" + k, "C-" + l) for k, l in _PAD_LABELS],
                         [("ic" + k, "IC-" + l) for k, l in _PAD_LABELS]]),
+        # upside-down pads (INVIS makes them invisible too)
+        ("UPSIDE PADS", [[(k + "_u", "U-" + l) for k, l in _PAD_LABELS],
+                         [("c" + k + "_u", "UC-" + l) for k, l in _PAD_LABELS]]),
+        ("CLICK ORBS", [[("c" + k, "C-" + l) for k, l in _ORB_LABELS],
+                        [("ic" + k, "IC-" + l) for k, l in _ORB_LABELS]]),
         ("PORTALS", [[("portal:" + m, m.upper()) for m in MODE_ORDER],
                      [("portal:miniwave", "MINI WAVE"), ("finish", "FINISH"),
                       ("grav_d", "GRAV v"), ("grav_u", "GRAV ^")]]),
@@ -4299,10 +4330,13 @@ _WHERE = {"tl": "ceiling, low on the left", "tr": "ceiling, low on the right",
           "bl": "floor, going down", "br": "floor, going up"}
 for _k in list(PAD_FX) + list(ORB_FX):
     _h = TOOL_HELP.get(_k, _k)
-    TOOL_HELP["i" + _k] = "Invisible: " + _h[0].lower() + _h[1:]
+    _l = _h[0].lower() + _h[1:]
+    TOOL_HELP["i" + _k] = "Invisible: " + _l
+    TOOL_HELP["c" + _k] = "Click " + _l + " - only if you click on it"
+    TOOL_HELP["ic" + _k] = "Invisible click " + _l
     if _k in PAD_FX:
-        TOOL_HELP["c" + _k] = "Click " + _h[0].lower() + _h[1:] + " - only if you click on it"
-        TOOL_HELP["ic" + _k] = "Invisible click " + _h[0].lower() + _h[1:]
+        TOOL_HELP[_k + "_u"] = "Upside-down " + _l + " (for when gravity is flipped)"
+        TOOL_HELP["c" + _k + "_u"] = "Upside-down click " + _l + " - only if you click"
 for _d in _DIRS:
     TOOL_HELP["ramp_" + _d] = "45-degree slope (1 block) - " + _WHERE[_d]
     TOOL_HELP["gramp_" + _d] = "Gentle slope 1/2 (2 wide, 1 tall) - " + _WHERE[_d]
@@ -4454,7 +4488,7 @@ def _trigger_fields(cfg):
 
 def orb_mark(s, kind, cx, cy, colr, k=1.0):
     """The symbol in the middle of an orb (what it does)."""
-    fx = ORB_FX[kind][0]
+    fx = ORB_FX[orb_base(kind)][0]
     if fx in ("dash", "gdash"):                         # straight ahead
         pygame.draw.lines(s, (20, 20, 30), False, [(cx - 4 * k, cy - 6 * k), (cx + 3 * k, cy),
                                                    (cx - 4 * k, cy + 6 * k)], 3)
@@ -5848,15 +5882,19 @@ class Editor:
             draw_dashed_rect(s, pygame.Rect(cx - 13, cy - 12, 26, 24), (255, 255, 255), 4, 3, 1)
         elif tool in PADS:
             colr = PAD_ORB_COLOR[tool]
-            top = tool in TOP_PADS
+            top = pad_on_top(tool)
             pygame.draw.ellipse(s, colr, (cx - 12, cy - 12 if top else cy + 2, 24, 10))
             pad_mark(s, pad_base(tool), cx, cy - 3 if not top else cy + 4, 0.7)
-            if tool in CLICK_PADS:                    # click pads: a "tap" ring
+            if tool in CLICK_KINDS:                   # click pads: a "tap" ring
                 pygame.draw.circle(s, (255, 255, 255), (cx, cy + (8 if top else -8)), 4, 1)
         elif tool in ORBS:
             pygame.draw.circle(s, PAD_ORB_COLOR[tool], (cx, cy), 7)
             pygame.draw.circle(s, (255, 255, 255), (cx, cy), 12, 2)
             orb_mark(s, tool, cx, cy, (255, 255, 255), 0.8)
+            if tool in CLICK_KINDS:                   # click orbs: a dashed outer ring
+                for a in range(0, 360, 45):
+                    pygame.draw.arc(s, PAD_ORB_COLOR[tool], (cx - 13, cy - 13, 26, 26),
+                                    math.radians(a), math.radians(a + 25), 2)
         elif tool.startswith("speed:"):
             v = float(tool.split(":")[1])
             colr = SPEED_COLOR[v]
@@ -6111,7 +6149,8 @@ class Editor:
             on = i == self.tab[self.layer]
             pygame.draw.rect(s, (40, 46, 90) if on else (18, 21, 46), r, border_radius=6)
             pygame.draw.rect(s, (255, 230, 90) if on else (60, 68, 120), r, 2, border_radius=6)
-            t = g.tiny.render(name, True, (255, 255, 255) if on else (160, 170, 210))
+            f = g.tiny if g.tiny.size(name)[0] <= r.w - 6 else g.micro   # (narrow tabs)
+            t = f.render(name, True, (255, 255, 255) if on else (160, 170, 210))
             s.blit(t, (r.centerx - t.get_width() // 2, r.centery - t.get_height() // 2))
         for row, pal in enumerate(self.cur_tab()):
             for i, (tool, label) in enumerate(pal):
@@ -9582,13 +9621,13 @@ class Game:
             pygame.draw.polygon(s, line if colored else (255, 255, 255), pts, 2)
         elif k in PADS:
             colr = PAD_ORB_COLOR[k]
-            top = k in TOP_PADS
+            top = pad_on_top(k)
             py = sy - 2 if top else sy + B - 12
             pygame.draw.ellipse(s, colr, (sx + 3, py, B - 6, 14))
             pygame.draw.ellipse(s, (255, 255, 255), (sx + 3, py, B - 6, 14), 2)
             mark_y = sy + 20 if top else sy + B - 20
             pad_mark(s, pad_base(k), int(sx + B / 2), mark_y)
-            if k in CLICK_PADS:                       # click pads: a pulsing "tap" ring
+            if k in CLICK_KINDS:                      # click pads: a pulsing "tap" ring
                 ring = 6 + int(2 * math.sin(pygame.time.get_ticks() * 0.008))
                 pygame.draw.circle(s, colr, (int(sx + B / 2), sy + (B - 10 if top else 10)),
                                    ring, 2)
@@ -9603,6 +9642,11 @@ class Game:
             pygame.draw.circle(s, col, (cx, cy), 11)
             pygame.draw.circle(s, white, (cx, cy), pulse, 2)
             orb_mark(s, k, cx, cy, white)
+            if k in CLICK_KINDS and not used:         # click orbs: a turning dashed ring
+                spin = pygame.time.get_ticks() * 0.003
+                for a in range(8):
+                    a0 = spin + a * math.pi / 4
+                    pygame.draw.arc(s, col, (cx - 23, cy - 23, 46, 46), a0, a0 + 0.45, 2)
         elif k in ("speed", "grav"):
             top = int(self.view_ceil + self.camy)
             r = pygame.Rect(0, 0, 26, FLOOR - self.view_ceil)
