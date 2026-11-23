@@ -132,8 +132,9 @@ Level editor
     PARTICLE a burst (or stream) of particles at the trigger or the player
     PULSE    flashes the whole screen, or one group, a palette colour
     ROTATE   spins a group around its own middle (or around another group)
-    COUNT    adds to a counter when you pass it - or for every click after it; when the
-             counter reaches the target a group appears / disappears
+    COUNT    adds to a counter when you pass it, when you click as you pass it (inside
+             its box, if it has one), or for every click after it; when the counter
+             reaches the target a group appears / disappears
   Any trigger can have a BOX (width x height): then it only fires if you go through the
   box instead of when you pass its column - good for hidden coin paths.
   TEXT  click a cell and type - text boxes can be in groups too.
@@ -396,6 +397,7 @@ LIGHT_EFFECTS = ("flicker_on", "flicker_off", "close_circle", "open_circle")
 LIGHT_NAMES = {"flicker_on": "Flicker on", "flicker_off": "Flicker off",
                "close_circle": "Close circle", "open_circle": "Open circle"}
 COUNTER_MAX = 99             # count triggers: item ids 1-99
+PASS_CLICK_FRAMES = 6        # "click as you pass it": how early / late the click can be
 TEXT_MAX = 60
 # colour slots for objects (main and background layer).  An object stores a slot
 # number: 0 = automatic (the game mode's colour), 1-10 = the level's own palette,
@@ -693,9 +695,11 @@ def _clean_trigger(j):
                 "target": int(num("target", 3, -999, 999)),
                 "group": int(num("group", 1, 1, GROUP_MAX)),
                 "show": bool(j.get("show", True)),
-                # "passing": adds once when you pass it; "clicks": from then on, every
-                # click adds to the counter
-                "counts": "clicks" if j.get("counts") == "clicks" else "passing"}
+                # "passing": adds once when you pass it; "pass_click": adds once if you
+                # click as you pass it (inside its box, if it has one); "clicks": from
+                # then on, every click adds to the counter
+                "counts": j.get("counts") if j.get("counts") in ("clicks", "pass_click")
+                else "passing"}
     return None
 
 
@@ -961,6 +965,11 @@ class Level:
         self.pulses = []         # running pulse triggers: [cfg, rgb, frame]
         self.click_counts = []   # count triggers counting clicks (after you passed them)
         self.box_fired = set()   # box triggers that have fired this attempt
+        self.frame = 0           # frames since (re)spawning
+        self.click_frame = -999  # frame of the last click
+        self.pass_waits = []     # "click as you pass" counters waiting for a click:
+        #                          [cfg, last frame a click still counts]
+        self.px = self.py = None  # where the player is (for clicks inside a box)
         self.next_trig = 0
         while self.next_trig < len(self.trig_list) and self.trig_list[self.next_trig][0] <= x:
             self.fire(*self.trig_list[self.next_trig][1:], instant=True)
@@ -1026,6 +1035,13 @@ class Level:
         elif t == "count":
             if cfg.get("counts") == "clicks":
                 self.click_counts.append(cfg)          # counts from now on
+            elif cfg.get("counts") == "pass_click":
+                if instant:
+                    pass                               # (passed before you respawned)
+                elif self.frame - self.click_frame <= PASS_CLICK_FRAMES:
+                    self.count(cfg)                    # clicked just before passing it
+                else:
+                    self.pass_waits.append([cfg, self.frame + PASS_CLICK_FRAMES])
             else:
                 self.count(cfg, instant)
         elif t == "light":
@@ -1047,16 +1063,33 @@ class Level:
 
     def click(self):
         """The player clicked: count triggers that count clicks add to their counters."""
+        self.click_frame = self.frame
         for cfg in self.click_counts:
             self.count(cfg)
+        waits, self.pass_waits = self.pass_waits, []     # clicked just after passing
+        for cfg, until in waits:
+            if self.frame <= until:
+                self.count(cfg)
+        if self.px is not None:                          # clicked inside a box
+            for i, (box, cfg, col, row) in enumerate(self.box_trigs):
+                if (cfg["type"] == "count" and cfg.get("counts") == "pass_click"
+                        and i not in self.box_fired
+                        and box.inflate(16, 16).collidepoint(self.px, self.py)):
+                    self.box_fired.add(i)
+                    self.count(cfg)
 
     def update(self, x, y=None):
         """Advance triggers by one frame for a player at world (x, y)."""
         while self.next_trig < len(self.trig_list) and self.trig_list[self.next_trig][0] <= x:
             self.fire(*self.trig_list[self.next_trig][1:])
             self.next_trig += 1
+        self.frame += 1
+        self.px, self.py = x, y
+        self.pass_waits = [w for w in self.pass_waits if w[1] >= self.frame]
         if self.box_trigs and y is not None:
             for i, (box, cfg, col, row) in enumerate(self.box_trigs):
+                if cfg["type"] == "count" and cfg.get("counts") == "pass_click":
+                    continue                     # (these count a click inside the box)
                 if i not in self.box_fired and box.inflate(16, 16).collidepoint(x, y):
                     self.box_fired.add(i)
                     self.fire(cfg, col, row)
@@ -4475,6 +4508,7 @@ def _trigger_fields(cfg):
     if t == "count":
         return [("item", "Counter (item id)", "int", (1, COUNTER_MAX, 1)),
                 ("counts", "Counts", "choice", [("passing", "Passing this trigger"),
+                                                ("pass_click", "Clicking as you pass"),
                                                 ("clicks", "Every click after it")]),
                 ("add", "Add each time (- takes away)", "int", (-100, 100, 1)),
                 ("target", "When it reaches", "int", (-999, 999, 1)),
