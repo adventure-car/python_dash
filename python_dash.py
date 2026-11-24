@@ -133,8 +133,9 @@ Level editor
     PULSE    flashes the whole screen, or one group, a palette colour
     ROTATE   spins a group around its own middle (or around another group)
     COUNT    adds to a counter when you pass it, when you click as you pass it (inside
-             its box, if it has one), or for every click after it; when the counter
-             reaches the target a group appears / disappears
+             its box, if it has one), or for every click after it (up to a click
+             limit); when the counter reaches the target a group appears / disappears,
+             or it runs every trigger whose "Run by count ID" is that number
   Any trigger can have a BOX (width x height): then it only fires if you go through the
   box instead of when you pass its column - good for hidden coin paths.
   TEXT  click a cell and type - text boxes can be in groups too.
@@ -638,6 +639,13 @@ def clean_trigger(j):
         w, h = 0, 1
     c["box_w"] = max(0, min(60, w))
     c["box_h"] = max(1, min(EDIT_ROWS, h))
+    # fire_id: 0 = fires when you pass it (or go through its box).  Otherwise it never
+    # fires by itself: a count trigger set to "Run triggers with this ID" runs it.
+    try:
+        fid = int(float(j.get("fire_id", 0)))
+    except (TypeError, ValueError):
+        fid = 0
+    c["fire_id"] = max(0, min(GROUP_MAX, fid))
     return c
 
 
@@ -694,7 +702,14 @@ def _clean_trigger(j):
                 "add": int(num("add", 1, -100, 100)),
                 "target": int(num("target", 3, -999, 999)),
                 "group": int(num("group", 1, 1, GROUP_MAX)),
-                "show": bool(j.get("show", True)),
+                # then: reveal / hide the group, or "run" the triggers whose
+                # fire_id is this group number (move, pulse, particle, rotate, light...)
+                "then": j.get("then") if j.get("then") in ("reveal", "hide", "run") else
+                ("reveal" if j.get("show", True) else "hide"),
+                "show": (j.get("then") or ("reveal" if j.get("show", True) else "hide"))
+                != "hide",
+                # clicks counted at most (for "Every click after it"; 0 = no limit)
+                "limit": int(num("limit", 0, 0, 999)),
                 # "passing": adds once when you pass it; "pass_click": adds once if you
                 # click as you pass it (inside its box, if it has one); "clicks": from
                 # then on, every click adds to the counter
@@ -905,16 +920,21 @@ class Level:
         self.move_groups = {c["group"] for _, _, c in trig if c["type"] in ("move", "rotate")}
         first = {}
         for _, _, c in trig:
-            if c["type"] in ("reveal", "count"):
+            if c["type"] == "reveal" or (c["type"] == "count" and c.get("then") != "run"):
                 first.setdefault(c["group"], c["show"])
         self.start_hidden = {g for g, show in first.items() if show}
         # column triggers fire when you pass their column; box triggers only when you
         # go through their box
+        # (triggers with a fire_id only run when a count trigger runs them)
         self.trig_list = [(col * B, c, col, row) for col, row, c in trig
-                          if not c.get("box_w")]
+                          if not c.get("box_w") and not c.get("fire_id")]
         self.box_trigs = [(pygame.Rect(col * B, FLOOR - (row + c["box_h"]) * B,
                                        c["box_w"] * B, c["box_h"] * B), c, col, row)
-                          for col, row, c in trig if c.get("box_w")]
+                          for col, row, c in trig if c.get("box_w") and not c.get("fire_id")]
+        self.id_trigs = defaultdict(list)          # fire_id -> [(settings, col, row)]
+        for col, row, c in trig:
+            if c.get("fire_id"):
+                self.id_trigs[c["fire_id"]].append((c, col, row))
 
         self.groups = defaultdict(list)
         self.cols = defaultdict(list)
@@ -1034,7 +1054,7 @@ class Level:
                 self._update_hidden()
         elif t == "count":
             if cfg.get("counts") == "clicks":
-                self.click_counts.append(cfg)          # counts from now on
+                self.click_counts.append([cfg, 0])     # counts from now on (clicks so far)
             elif cfg.get("counts") == "pass_click":
                 if instant:
                     pass                               # (passed before you respawned)
@@ -1057,14 +1077,28 @@ class Level:
 
     def count(self, cfg, instant=False):
         self.counters[cfg["item"]] += cfg["add"]
-        if self.counters[cfg["item"]] == cfg["target"]:
+        if self.counters[cfg["item"]] != cfg["target"]:
+            return
+        if cfg.get("then") == "run":               # run the triggers with this ID
+            self.depth = getattr(self, "depth", 0) + 1
+            try:
+                if self.depth <= 20:               # (count triggers running each other)
+                    for c, col, row in self.id_trigs.get(cfg["group"], ()):
+                        self.fire(c, col, row, instant=instant)
+            finally:
+                self.depth -= 1
+        else:
             self.fire({"type": "reveal", "group": cfg["group"], "show": cfg["show"]},
                       instant=instant)
 
     def click(self):
         """The player clicked: count triggers that count clicks add to their counters."""
         self.click_frame = self.frame
-        for cfg in self.click_counts:
+        for cc in self.click_counts:
+            cfg, n = cc
+            if cfg.get("limit") and n >= cfg["limit"]:
+                continue                               # it has counted all it may
+            cc[1] = n + 1
             self.count(cfg)
         waits, self.pass_waits = self.pass_waits, []     # clicked just after passing
         for cfg, until in waits:
@@ -4460,7 +4494,8 @@ def etab_rect(i, n=6):
 
 
 BOX_FIELDS = [("box_w", "Box width (0 = the whole column)", "int", (0, 60, 1)),
-              ("box_h", "Box height (blocks, from here up)", "int", (1, EDIT_ROWS, 1))]
+              ("box_h", "Box height (blocks, from here up)", "int", (1, EDIT_ROWS, 1)),
+              ("fire_id", "Run by count ID (0 = when passed)", "int", (0, GROUP_MAX, 1))]
 
 
 def trigger_fields(cfg):
@@ -4510,11 +4545,13 @@ def _trigger_fields(cfg):
                 ("counts", "Counts", "choice", [("passing", "Passing this trigger"),
                                                 ("pass_click", "Clicking as you pass"),
                                                 ("clicks", "Every click after it")]),
+                ("limit", "Click limit (0 = no limit)", "int", (0, 999, 1)),
                 ("add", "Add each time (- takes away)", "int", (-100, 100, 1)),
                 ("target", "When it reaches", "int", (-999, 999, 1)),
-                ("group", "Group", "int", (1, GROUP_MAX, 1)),
-                ("show", "Then", "choice", [(True, "Reveal the group"),
-                                            (False, "Hide the group")])]
+                ("then", "Then", "choice", [("reveal", "Reveal the group"),
+                                            ("hide", "Hide the group"),
+                                            ("run", "Run triggers w/ ID")]),
+                ("group", "Group / trigger ID", "int", (1, GROUP_MAX, 1))]
     return [("effect", "Effect", "choice", [(e, LIGHT_NAMES[e]) for e in LIGHT_EFFECTS]),
             ("radius", "Circle radius (blocks)", "float", (1, 12, 0.5)),
             ("time", "Time (seconds)", "float", (0, 10, 0.1))]
@@ -5023,6 +5060,8 @@ class Editor:
         f = self.form
         if keep and f:
             self.commit_typing()
+            if f["cfg"].get("type") == "count":       # ("show" follows "then")
+                f["cfg"]["show"] = f["cfg"].get("then") != "hide"
             cfg = clean_trigger(f["cfg"])
             if cfg and cfg != self.data.triggers.get(f["cell"]):
                 self.push_undo()
@@ -5965,7 +6004,9 @@ class Editor:
         t = cfg["type"]
         colr = TRIG_COLOR[t]
         x = c * B - cam
-        if cfg.get("box_w"):                       # it fires only inside its box
+        if cfg.get("fire_id"):                     # only run by a count trigger
+            pass
+        elif cfg.get("box_w"):                     # it fires only inside its box
             bw, bh = cfg["box_w"], cfg["box_h"]
             box = pygame.Rect(int(x), int(self.row_y(r + bh - 1)), bw * B, bh * B)
             veil = pygame.Surface(box.size, pygame.SRCALPHA)
@@ -5981,6 +6022,8 @@ class Editor:
         lab = ("I%d" % cfg["item"] if t == "count" else
                "G%d" % cfg["group"] if "group" in cfg and not (
                    t == "pulse" and cfg["target"] == "screen") else "")
+        if cfg.get("fire_id"):                     # run by count ID n
+            lab = (lab + " " if lab else "") + "ID%d" % cfg["fire_id"]
         if lab:
             tt = g.tiny.render(lab, True, colr)
             s.blit(tt, (cx - tt.get_width() // 2, cy + 12))
