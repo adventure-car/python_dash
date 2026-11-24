@@ -710,9 +710,9 @@ def _clean_trigger(j):
                 != "hide",
                 # clicks counted at most (for "Every click after it"; 0 = no limit)
                 "limit": int(num("limit", 0, 0, 999)),
-                # "passing": adds once when you pass it; "pass_click": adds once if you
-                # click as you pass it (inside its box, if it has one); "clicks": from
-                # then on, every click adds to the counter
+                # "passing": adds once when you pass it; "pass_click": every click as
+                # you pass it (inside its box, if it has one) adds; "clicks": from then
+                # on, every click adds to the counter
                 "counts": j.get("counts") if j.get("counts") in ("clicks", "pass_click")
                 else "passing"}
     return None
@@ -986,9 +986,10 @@ class Level:
         self.click_counts = []   # count triggers counting clicks (after you passed them)
         self.box_fired = set()   # box triggers that have fired this attempt
         self.frame = 0           # frames since (re)spawning
-        self.click_frame = -999  # frame of the last click
-        self.pass_waits = []     # "click as you pass" counters waiting for a click:
+        self.click_frames = deque(maxlen=32)   # frames of the latest clicks
+        self.pass_waits = []     # "click as you pass" counters still taking clicks:
         #                          [cfg, last frame a click still counts]
+        self.pass_n = {}         # "click as you pass" counter -> clicks it has counted
         self.px = self.py = None  # where the player is (for clicks inside a box)
         self.next_trig = 0
         while self.next_trig < len(self.trig_list) and self.trig_list[self.next_trig][0] <= x:
@@ -1056,11 +1057,11 @@ class Level:
             if cfg.get("counts") == "clicks":
                 self.click_counts.append([cfg, 0])     # counts from now on (clicks so far)
             elif cfg.get("counts") == "pass_click":
-                if instant:
-                    pass                               # (passed before you respawned)
-                elif self.frame - self.click_frame <= PASS_CLICK_FRAMES:
-                    self.count(cfg)                    # clicked just before passing it
-                else:
+                if not instant:                        # (not if passed before respawning)
+                    for f in self.click_frames:        # clicks just before passing it
+                        if self.frame - f <= PASS_CLICK_FRAMES:
+                            self.pass_count(cfg)
+                    # ...and clicks just after it count too
                     self.pass_waits.append([cfg, self.frame + PASS_CLICK_FRAMES])
             else:
                 self.count(cfg, instant)
@@ -1091,26 +1092,31 @@ class Level:
             self.fire({"type": "reveal", "group": cfg["group"], "show": cfg["show"]},
                       instant=instant)
 
+    def pass_count(self, cfg):
+        """One click for a "Clicking as you pass" counter (up to its click limit)."""
+        n = self.pass_n.get(id(cfg), 0)
+        if cfg.get("limit") and n >= cfg["limit"]:
+            return
+        self.pass_n[id(cfg)] = n + 1
+        self.count(cfg)
+
     def click(self):
         """The player clicked: count triggers that count clicks add to their counters."""
-        self.click_frame = self.frame
+        self.click_frames.append(self.frame)
         for cc in self.click_counts:
             cfg, n = cc
             if cfg.get("limit") and n >= cfg["limit"]:
                 continue                               # it has counted all it may
             cc[1] = n + 1
             self.count(cfg)
-        waits, self.pass_waits = self.pass_waits, []     # clicked just after passing
-        for cfg, until in waits:
+        for cfg, until in self.pass_waits:               # clicked just after passing
             if self.frame <= until:
-                self.count(cfg)
-        if self.px is not None:                          # clicked inside a box
-            for i, (box, cfg, col, row) in enumerate(self.box_trigs):
+                self.pass_count(cfg)
+        if self.px is not None:                          # every click inside a box
+            for box, cfg, col, row in self.box_trigs:
                 if (cfg["type"] == "count" and cfg.get("counts") == "pass_click"
-                        and i not in self.box_fired
                         and box.inflate(16, 16).collidepoint(self.px, self.py)):
-                    self.box_fired.add(i)
-                    self.count(cfg)
+                    self.pass_count(cfg)
 
     def update(self, x, y=None):
         """Advance triggers by one frame for a player at world (x, y)."""
@@ -4545,7 +4551,8 @@ def _trigger_fields(cfg):
                 ("counts", "Counts", "choice", [("passing", "Passing this trigger"),
                                                 ("pass_click", "Clicking as you pass"),
                                                 ("clicks", "Every click after it")]),
-                ("limit", "Click limit (0 = no limit)", "int", (0, 999, 1)),
+                ("limit", "Click limit (0 = no limit)", "int", (0, 999, 1)),   # (both
+                #                                                    click modes)
                 ("add", "Add each time (- takes away)", "int", (-100, 100, 1)),
                 ("target", "When it reaches", "int", (-999, 999, 1)),
                 ("then", "Then", "choice", [("reveal", "Reveal the group"),
