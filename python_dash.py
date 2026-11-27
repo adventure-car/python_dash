@@ -46,8 +46,8 @@ Level select has four tabs (LEFT/RIGHT or click):
                 into this file.  Ranked online levels you don't have: ENTER downloads them.
   Online        levels in the repo, in three sections: BROWSE (all of them), NEWEST 20
                 (the most recent uploads) and SEARCH (name, maker or description).
-                B / N / F switch sections; DIFFICULTY (or T) sorts them easiest / hardest
-                first or shows one rating only.  Leaving a level you played from here brings
+                B / N / F switch sections; DIFFICULTY (or T) opens a checklist: tick
+                the ratings to show (none ticked = all) and sort easiest / hardest first.  Leaving a level you played from here brings
                 you back to the same section, search and level.
 
 Uploading your levels
@@ -6601,9 +6601,9 @@ RANKS_TAB = 4
 ONLINE_TAB = 5
 # sections inside the Online tab
 ONLINE_SECTIONS = [("browse", "BROWSE"), ("recent", "NEWEST 20"), ("search", "SEARCH")]
-# the Online tab's difficulty sorter: the normal order, sorted, or only one rating
-DIFF_SORTS = (["all", "easy_first", "hard_first"] + ["only:" + d for d in DIFF_ORDER]
-              + ["only:UNRATED"])
+# the Online tab's difficulty checklist: every rating, and how to sort
+DIFF_CHECKS = DIFF_ORDER + ["UNRATED"]
+DIFF_SORTS = [("all", "NORMAL"), ("easy_first", "EASIEST"), ("hard_first", "HARDEST")]
 RECENT_COUNT = 20
 CARD_H, CARD_GAP, CARD_TOP, CARD_X, CARD_W = 68, 8, 104, 50, 860
 HOME_BUTTONS = [("PLAY", (90, 230, 120)), ("BUILD LEVELS", (120, 200, 255)),
@@ -6661,7 +6661,9 @@ class Game:
         self.online_sec = "browse"                # Online tab section: browse / recent / search
         self.online_query = ""                    # what's typed in the search box
         self.online_typing = False                # typing in the search box right now
-        self.online_diff = "all"                  # the difficulty sorter (see DIFF_SORTS)
+        self.online_diffs = set()                 # difficulty checklist (none = all)
+        self.online_sort = "all"                  # order: all / easy_first / hard_first
+        self.diff_panel = None                    # the checklist while it's open: row
         self.online_sel = {k: 0 for k, _ in ONLINE_SECTIONS}   # where you were in each one
         self.play_from_online = False             # the level being played came from Online
         self.update_prompt = None                 # "There's an update - download it?"
@@ -7730,10 +7732,10 @@ class Game:
                      "col": (150, 160, 200), "modes": [], "best": None}]
         levels = list(self.online["levels"])
         sec = self.online_sec
-        sort = self.online_diff
-        if sort.startswith("only:"):           # the difficulty sorter: one rating only
-            want = sort.split(":")[1]
-            levels = [lv for lv in levels if (lv.get("rating") or "UNRATED") == want]
+        sort = self.online_sort
+        if self.online_diffs:                  # the checklist: only the ratings ticked
+            levels = [lv for lv in levels
+                      if (lv.get("rating") or "UNRATED") in self.online_diffs]
         if sec == "recent":                    # newest uploads first
             levels = [lv for lv in levels if lv.get("uploaded")]
             levels.sort(key=lambda lv: lv["uploaded"], reverse=True)
@@ -7786,10 +7788,11 @@ class Game:
                           "coins": (len(self.save.get(key + "#coins", [])), lv.get("coins", 0))
                           if (have or best) else None})
         if not items:
-            if sort.startswith("only:"):
+            if self.online_diffs:
                 return [{"type": "online_msg",
-                         "name": "No %s levels here" % sort.split(":")[1],
-                         "sub": "Click DIFFICULTY (or press T) to pick another one",
+                         "name": "No %s levels here" % " / ".join(
+                             d for d in DIFF_CHECKS if d in self.online_diffs),
+                         "sub": "Click DIFFICULTY (or press T) to tick other ones",
                          "tag": "", "col": (150, 160, 200), "modes": [], "best": None}]
             msg = {"browse": ("No levels online yet", "github.com/%s - levels folder" % REPO),
                    "recent": ("No new uploads yet",
@@ -8039,6 +8042,7 @@ class Game:
         return it
 
     def set_tab(self, i):
+        self.diff_panel = None
         self.go_select(0, i)
 
     def go_mylevels(self, page="list", sel=0):
@@ -8977,16 +8981,123 @@ class Game:
             return pygame.Rect(350, 132, 344, 28)
         return pygame.Rect(700, 132, W - 750, 28)
 
-    def diff_sort_label(self):
-        d = self.online_diff
-        return {"all": "DIFFICULTY: ALL", "easy_first": "EASIEST FIRST",
-                "hard_first": "HARDEST FIRST"}.get(d, "ONLY " + d.split(":")[-1])
+    def diff_label(self):
+        picked = [d for d in DIFF_CHECKS if d in self.online_diffs]
+        if not picked:
+            label = "DIFFICULTY: ALL"
+        elif len(picked) <= 2:
+            label = ", ".join(picked)
+        else:
+            label = "%d DIFFICULTIES" % len(picked)
+        return label + ("  " + {"easy_first": "(easy 1st)", "hard_first": "(hard 1st)"}
+                        .get(self.online_sort, "")).rstrip()
 
-    def set_diff_sort(self, step):
-        i = DIFF_SORTS.index(self.online_diff) if self.online_diff in DIFF_SORTS else 0
-        self.online_diff = DIFF_SORTS[(i + step) % len(DIFF_SORTS)]
+    def diff_panel_rects(self):
+        """The open checklist: its box, the sort buttons, then a row per rating."""
+        top = self.online_sec_rect(3)
+        box = pygame.Rect(top.x, top.bottom + 4, top.w, 74 + len(DIFF_CHECKS) * 28 + 40)
+        sw = (box.w - 20) // len(DIFF_SORTS)
+        sorts = [pygame.Rect(box.x + 10 + i * sw, box.y + 22, sw - 4, 24)
+                 for i in range(len(DIFF_SORTS))]
+        rows = [pygame.Rect(box.x + 8, box.y + 72 + i * 28, box.w - 16, 26)
+                for i in range(len(DIFF_CHECKS))]
+        clear = pygame.Rect(box.x + 12, box.bottom - 34, box.w - 24, 26)
+        return box, sorts, rows, clear
+
+    def toggle_diff(self, d):
+        self.online_diffs ^= {d}
         self.online_sel[self.online_sec] = 0
         self.go_select(0, ONLINE_TAB)
+
+    def set_sort(self, key):
+        self.online_sort = key
+        self.online_sel[self.online_sec] = 0
+        self.go_select(0, ONLINE_TAB)
+
+    def diff_panel_event(self, e):
+        """Clicks and keys while the difficulty checklist is open."""
+        box, sorts, rows, clear = self.diff_panel_rects()
+        if e.type == pygame.MOUSEBUTTONDOWN and e.button in (1, 3):
+            for (key, _), r in zip(DIFF_SORTS, sorts):
+                if r.collidepoint(e.pos):
+                    self.set_sort(key)
+                    return
+            for d, r in zip(DIFF_CHECKS, rows):
+                if r.collidepoint(e.pos):
+                    self.diff_panel = DIFF_CHECKS.index(d)
+                    self.toggle_diff(d)
+                    return
+            if clear.collidepoint(e.pos):
+                self.online_diffs = set()
+                self.go_select(0, ONLINE_TAB)
+                return
+            if not box.collidepoint(e.pos):    # clicked outside: close it
+                self.diff_panel = None
+            return
+        if e.type == pygame.MOUSEWHEEL:
+            return
+        if e.type != pygame.KEYDOWN:
+            return
+        k, n = e.key, len(DIFF_CHECKS)
+        if k in (pygame.K_ESCAPE, pygame.K_t, pygame.K_RETURN, pygame.K_KP_ENTER):
+            self.diff_panel = None
+        elif k in (pygame.K_UP, pygame.K_w):
+            self.diff_panel = (self.diff_panel - 1) % n
+        elif k in (pygame.K_DOWN, pygame.K_s):
+            self.diff_panel = (self.diff_panel + 1) % n
+        elif k in (pygame.K_SPACE, pygame.K_x):
+            self.toggle_diff(DIFF_CHECKS[self.diff_panel])
+        elif k in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_a, pygame.K_d):
+            keys = [key for key, _ in DIFF_SORTS]
+            step = -1 if k in (pygame.K_LEFT, pygame.K_a) else 1
+            self.set_sort(keys[(keys.index(self.online_sort) + step) % len(keys)])
+        elif k == pygame.K_c:
+            self.online_diffs = set()
+            self.go_select(0, ONLINE_TAB)
+
+    def draw_diff_panel(self):
+        s = self.screen
+        box, sorts, rows, clear = self.diff_panel_rects()
+        mx, my = pygame.mouse.get_pos()
+        sh = box.move(4, 5)
+        pygame.draw.rect(s, (4, 4, 12), sh, border_radius=10)
+        pygame.draw.rect(s, (20, 24, 50), box, border_radius=10)
+        pygame.draw.rect(s, (255, 230, 90), box, 2, border_radius=10)
+        t = self.tiny.render("SORT", True, (170, 180, 220))
+        s.blit(t, (box.x + 12, box.y + 6))
+        for (key, label), r in zip(DIFF_SORTS, sorts):
+            on = key == self.online_sort
+            pygame.draw.rect(s, (40, 46, 90) if on or r.collidepoint((mx, my)) else (16, 19, 42),
+                             r, border_radius=6)
+            pygame.draw.rect(s, (255, 230, 90) if on else (60, 68, 120), r, 2, border_radius=6)
+            tt = self.micro.render(label, True, (255, 255, 255) if on else (160, 170, 210))
+            s.blit(tt, (r.centerx - tt.get_width() // 2, r.centery - tt.get_height() // 2))
+        t = self.tiny.render("SHOW  (none ticked = all)", True, (170, 180, 220))
+        s.blit(t, (box.x + 12, rows[0].y - 20))
+        for i, (d, r) in enumerate(zip(DIFF_CHECKS, rows)):
+            hov = r.collidepoint((mx, my)) or i == self.diff_panel
+            if hov:
+                pygame.draw.rect(s, (40, 46, 90), r, border_radius=6)
+            cb = pygame.Rect(r.x + 6, r.centery - 9, 18, 18)
+            pygame.draw.rect(s, (8, 8, 20), cb, border_radius=4)
+            pygame.draw.rect(s, DIFF_COLOR[d], cb, 2, border_radius=4)
+            if d in self.online_diffs:                     # a tick
+                pygame.draw.lines(s, DIFF_COLOR[d], False, [(cb.x + 3, cb.centery),
+                                                            (cb.x + 7, cb.bottom - 4),
+                                                            (cb.right - 3, cb.y + 3)], 3)
+            n = sum(1 for lv in self.online.get("levels", [])
+                    if (lv.get("rating") or "UNRATED") == d) \
+                if self.online.get("status") == "ok" else None
+            tt = self.small.render(d, True, DIFF_COLOR[d])
+            s.blit(tt, (cb.right + 10, r.centery - tt.get_height() // 2))
+            if n is not None:
+                ct = self.tiny.render(str(n), True, (150, 160, 200))
+                s.blit(ct, (r.right - ct.get_width() - 8, r.centery - ct.get_height() // 2))
+        hov = clear.collidepoint((mx, my))
+        pygame.draw.rect(s, (40, 46, 90) if hov else (16, 19, 42), clear, border_radius=6)
+        pygame.draw.rect(s, (200, 205, 230), clear, 1, border_radius=6)
+        tt = self.micro.render("C: CLEAR (SHOW ALL)", True, (220, 225, 245))
+        s.blit(tt, (clear.centerx - tt.get_width() // 2, clear.centery - tt.get_height() // 2))
 
     def migrate_accounts(self):
         """Copy accounts made before accounts went online (on this computer, or in a folder
@@ -9037,6 +9148,13 @@ class Game:
         if online and self.online_typing and e.type == pygame.KEYDOWN:
             self.online_type_event(e)
             return
+        if online and self.diff_panel is not None:   # the difficulty checklist is open
+            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 \
+                    and self.online_sec_rect(3).collidepoint(e.pos):
+                self.diff_panel = None               # (its button closes it again)
+                return
+            self.diff_panel_event(e)
+            return
         if online and e.type == pygame.KEYDOWN and e.key in (pygame.K_b, pygame.K_n,
                                                              pygame.K_f, pygame.K_SLASH):
             self.set_online_sec({pygame.K_b: "browse", pygame.K_n: "recent"}.get(
@@ -9049,15 +9167,11 @@ class Game:
                     return
             if self.online_sec_rect(3).collidepoint(e.pos):
                 self.online_typing = False
-                self.set_diff_sort(1)
+                self.diff_panel = 0                  # open the difficulty checklist
                 return
             self.online_typing = False
-        if online and e.type == pygame.MOUSEBUTTONDOWN and e.button == 3 \
-                and self.online_sec_rect(3).collidepoint(e.pos):
-            self.set_diff_sort(-1)                   # (right-click: back a step)
-            return
         if online and e.type == pygame.KEYDOWN and e.key == pygame.K_t:
-            self.set_diff_sort(-1 if e.mod & pygame.KMOD_SHIFT else 1)
+            self.diff_panel = 0
             return
         if e.type == pygame.KEYDOWN:
             k = e.key
@@ -9514,14 +9628,18 @@ class Game:
             t = self.small.render(text, True, colr)
             x = r.x + 12 if key == "search" else r.centerx - t.get_width() // 2
             s.blit(t, (x, r.centery - t.get_height() // 2))
-        r = self.online_sec_rect(3)                  # the difficulty sorter
-        d = self.online_diff
-        on = d != "all"
-        colr = DIFF_COLOR.get(d.split(":")[-1], (255, 230, 90)) if on else (160, 170, 210)
-        pygame.draw.rect(s, (40, 46, 90) if (on or r.collidepoint((mx, my))) else (16, 19, 42),
+        r = self.online_sec_rect(3)                  # the difficulty checklist button
+        on = bool(self.online_diffs) or self.online_sort != "all"
+        picked = [d for d in DIFF_CHECKS if d in self.online_diffs]
+        colr = (DIFF_COLOR[picked[0]] if len(picked) == 1 else (255, 230, 90)) if on \
+            else (160, 170, 210)
+        pygame.draw.rect(s, (40, 46, 90) if (on or self.diff_panel is not None
+                                             or r.collidepoint((mx, my))) else (16, 19, 42),
                          r, border_radius=8)
         pygame.draw.rect(s, colr if on else (60, 68, 120), r, 2, border_radius=8)
-        t = self.small.render(self.diff_sort_label(), True, colr if on else (160, 170, 210))
+        label = self.diff_label() + ("  ^" if self.diff_panel is not None else "  v")
+        f = self.small if self.small.size(label)[0] <= r.w - 12 else self.tiny
+        t = f.render(label, True, colr)
         s.blit(t, (r.centerx - t.get_width() // 2, r.centery - t.get_height() // 2))
 
     def draw_list(self, title, subtitle, hint):
@@ -9624,6 +9742,8 @@ class Game:
         s.blit(h, (W // 2 - h.get_width() // 2, H - 26))
         if self.update_prompt and self.state == "select":
             self.draw_update_prompt()
+        if self.diff_panel is not None and self.state == "select" and self.tab == ONLINE_TAB:
+            self.draw_diff_panel()
         self.present()
 
     # ---- drawing: gameplay -----------------------------------------------------------
