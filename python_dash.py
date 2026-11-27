@@ -856,6 +856,7 @@ class Level:
         self.sections = []       # (mode, column of the portal that starts it)
         self.end_col = 0
         self.music = None        # full path of the level's song, if any
+        self.music_name = ""     # its file name (even when you don't have the song)
         self.theme = ""          # background theme ("" or "underwater")
         self.theme_zones = []    # background areas: (c0, r0, c1, r1, theme)
         self.start_pos = None    # (col, row) where the player starts (None = the usual spot)
@@ -1366,6 +1367,13 @@ def store_music(src_path=None, raw=None, name_hint="song", ext=".mp3"):
     return name
 
 
+def git_sha(path):
+    """A file's fingerprint the way GitHub works it out (its "blob" sha)."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    return hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest()
+
+
 # --------------------------------------------------------------------------
 # Editable level data (what the editor works on and saves to disk)
 # --------------------------------------------------------------------------
@@ -1451,6 +1459,7 @@ class LevelData:
         end = self.finish if self.finish is not None else max(self.last_col() + 12, 40)
         lv.end_col = max(end, lv.sections[-1][1] + 4)
         lv.music = music_path(self.music)
+        lv.music_name = self.music               # (to download it, if it's missing)
 
     def to_json(self, embed_music=False):
         j = {
@@ -4486,6 +4495,16 @@ def fetch_online_levels(out):
 def fetch_online_music(out):
     try:
         out["songs"] = repo_list("music", MUSIC_EXTS)
+        # each song's fingerprint (GitHub's file sha), to spot a song you have under
+        # another name (the game names its copies of songs by their content)
+        out["index"] = {}
+        try:
+            data = json.loads(http_get("https://api.github.com/repos/%s/contents/music?ref=%s"
+                                       % (REPO, REPO_BRANCH)))
+            out["index"] = {f["sha"]: f["name"] for f in data
+                            if isinstance(f, dict) and f.get("sha") and f.get("name")}
+        except Exception:
+            pass
         out["status"] = "ok"
     except Exception as ex:
         out["status"] = "error"
@@ -6843,6 +6862,9 @@ class Game:
         self.acct = None             # the sign-in / sign-up form
         self.music_ok = None         # can we play sound at all? (decided on first use)
         self.music_on = None         # path of the song that is playing
+        self.songs_asked = set()     # songs already looked for in the repo this session
+        self.fetch_online_songs()    # (what's in the repo's music folder, for sharing)
+        self.song_arrived = None     # (level, path) when a missing song has downloaded
         sk = self.save.get("__skins__")
         self.skins = dict(sk) if isinstance(sk, dict) else {}     # mode -> skin id
         self.server_pull = None      # progress being fetched from the server
@@ -8285,7 +8307,8 @@ class Game:
         try:
             data = it["data"]
             data.author = self.account or ""             # your account name goes with it
-            j = data.to_json(embed_music=True)          # ...and so does its song
+            j = self.share_json(data)                   # ...and its song (by name if
+            #                                             it's in the repo, else inside)
             with open(dest, "w") as f:
                 json.dump(j, f)
         except OSError:
@@ -8295,6 +8318,43 @@ class Game:
         if not self.account:
             msg += "  (sign in to put your name on it)"
         self.say(msg)
+
+    def repo_song(self, name, wait=False):
+        """The name of the song in the repo's music folder that is the same song as
+        `name` in your music folder, or None if it isn't in the repo (or the repo's list
+        isn't here yet - wait=True asks GitHub now; only from a background thread)."""
+        o = self.online_songs
+        if o.get("status") != "ok" and not wait:
+            self.fetch_online_songs()
+            return None
+        if o.get("status") != "ok":                  # (find out what's in the repo)
+            tmp = {}
+            fetch_online_music(tmp)
+            if tmp.get("status") != "ok":
+                return None
+            if self.online_songs.get("status") != "loading":
+                self.online_songs = tmp
+            o = tmp
+        names = {n for n, _ in o.get("songs", [])}
+        if name in names:
+            return name
+        path = music_path(name)
+        if path and o.get("index"):
+            try:
+                return o["index"].get(git_sha(path))
+            except OSError:
+                return None
+        return None
+
+    def share_json(self, data, wait=False):
+        """A level ready to share (upload / export): if its song is in the repo's music
+        folder it just names that song; otherwise the song goes inside the file."""
+        song = self.repo_song(data.music, wait) if data.music else None
+        if song:
+            j = data.to_json()
+            j["music"] = song
+            return j
+        return data.to_json(embed_music=True)
 
     def upload_selected(self):
         """Send a level from Your Levels to the shared folder as an upload request.
@@ -8322,7 +8382,7 @@ class Game:
             os.makedirs(SUBMIT_DIR, exist_ok=True)
             data = it["data"]
             data.author = self.account                   # your account name goes with it
-            j = data.to_json(embed_music=True)           # ...and so does its song
+            j = self.share_json(data)                    # ...and its song
             dest = unique_level_path(it["name"], SUBMIT_DIR)
             with open(dest, "w") as f:
                 json.dump(j, f)
@@ -8337,17 +8397,17 @@ class Game:
         if not self.server_user:
             self.say("Sign in first so your upload is sent under your name")
             return
-        try:
-            data = it["data"]
-            data.author = self.account
-            j = data.to_json(embed_music=True)            # the song goes with it
-        except OSError:
-            self.say("Couldn't read the level")
-            return
+        data = it["data"]
+        data.author = self.account
         token = self.server_user["token"]
         self.say("Uploading \"%s\"..." % data.name)
 
         def send():
+            try:
+                j = self.share_json(data, wait=True)   # its song: by name if in the repo
+            except OSError:
+                self.say("Couldn't read the level")
+                return
             try:
                 server_call("POST", "/api/levels/submit", {"level": j}, token, timeout=120)
                 self.say("Uploaded \"%s\" - AXO or AugmentedMagic will review it" % data.name)
@@ -8492,7 +8552,7 @@ class Game:
             data = self.custom[f["lvl"] - 1]
             data.author = self.account or ""
             try:
-                body["level"] = data.to_json(embed_music=True)      # (its song goes too)
+                body["level"] = self.share_json(data)   # (its song: by name, or inside)
             except OSError:
                 f["err"] = "Couldn't read that level"
                 return
@@ -8894,7 +8954,26 @@ class Game:
             self.say("Couldn't play the song")
             return False
 
+    def get_missing_song(self):
+        """The level's song isn't in your music folder: try to download it from the
+        repo's music folder; it starts playing when it arrives."""
+        lv = self.level
+        name = os.path.basename(getattr(lv, "music_name", "") or "")
+        if not name or lv.music or name in self.songs_asked:
+            return
+        self.songs_asked.add(name)
+
+        def get():
+            try:
+                path = download_song(name)
+            except Exception:
+                return                              # (not in the repo either)
+            self.song_arrived = (lv, path)
+        threading.Thread(target=get, daemon=True).start()
+
     def start_level_music(self):
+        if self.level and not self.level.music and getattr(self.level, "music_name", ""):
+            self.get_missing_song()
         if self.level and self.level.music and self.settings["music"]:
             self.play_music(self.level.music, self.level.time_at(self.player.x))
         else:
@@ -9570,6 +9649,13 @@ class Game:
     def update(self):
         self.menu_t += 1
         self.server_sync_update()
+        if self.song_arrived:                     # a missing song finished downloading
+            lv, path = self.song_arrived
+            self.song_arrived = None
+            if lv is self.level:
+                lv.music = path
+                if self.state == "play" and self.player.alive and not self.finished:
+                    self.start_level_music()
         if self.state == "myonline" and self.my_online_shown != (
                 id(self.my_online), self.my_online.get("status")):
             self.show_myonline(self.sel)          # (the list arrived from the server)
