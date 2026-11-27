@@ -858,6 +858,7 @@ class Level:
         self.music = None        # full path of the level's song, if any
         self.theme = ""          # background theme ("" or "underwater")
         self.theme_zones = []    # background areas: (c0, r0, c1, r1, theme)
+        self.start_pos = None    # (col, row) where the player starts (None = the usual spot)
         self.palette = list(DEFAULT_PALETTE)   # the level's 10 editable colours
         defn.builder(self)
         self.finalize()
@@ -1004,7 +1005,7 @@ class Level:
         for o in sorted(self.objs, key=lambda o: o.row):
             if o.kind == "checkpoint":
                 flags.setdefault(o.col, o.row)
-        cps = [{"x": 3.0 * B, "kind": "start", "sec": 0}]
+        cps = [{"x": self.start_x, "kind": "start", "sec": 0}]
         cps += [{"x": float(c * B + B // 2), "kind": "portal", "sec": i, "row": flags.get(c)}
                 for i, (_, c) in enumerate(self.sections) if i > 0]
         self.checkpoints = cps
@@ -1261,6 +1262,10 @@ class Level:
                     out[cfg["group"]] = (rgb, a)
         return out
 
+    @property
+    def start_x(self):
+        return self.start_pos[0] * B + B / 2 if self.start_pos else 3.0 * B
+
     def dual_at(self, x):
         """Is dual mode on at world x (after the last symmetry / unsymmetry portal)?"""
         on = False
@@ -1372,6 +1377,7 @@ class LevelData:
         self.bg = {}         # (col,row) -> (kind, flip, group, color)  background layer
         self.theme = ""      # background theme: "" or "underwater"
         self.zones = []      # background areas: [c0, r0, c1, r1, theme] (their own theme)
+        self.start_pos = None   # (col, row) the player starts at (None = the usual spot)
         self.palette = list(DEFAULT_PALETTE)   # colour slots 1-10 (editable)
         self.texts = {}      # (col,row) -> (text, group)
         self.triggers = {}   # (col,row) -> settings dict (see clean_trigger)
@@ -1389,12 +1395,13 @@ class LevelData:
         return copy.deepcopy((self.cells, self.bg, self.texts, self.triggers, self.gravs,
                               self.portals, self.speeds, self.finish, self.start_mode,
                               self.name, self.description, self.music, self.theme,
-                              self.palette, self.zones))
+                              self.palette, self.zones, self.start_pos))
 
     def restore(self, snap):
         (self.cells, self.bg, self.texts, self.triggers, self.gravs, self.portals,
          self.speeds, self.finish, self.start_mode, self.name, self.description,
-         self.music, self.theme, self.palette, self.zones) = copy.deepcopy(snap)
+         self.music, self.theme, self.palette, self.zones,
+         self.start_pos) = copy.deepcopy(snap)
 
     def last_col(self):
         cols = ([c for c, _ in self.cells] + [c for c, _ in self.bg]
@@ -1432,6 +1439,7 @@ class LevelData:
             lv.bg_objs.append(Obj(kind, c, r, flip=flip, group=grp, color=colr))
         lv.theme = self.theme
         lv.theme_zones = [tuple(z) for z in self.zones]
+        lv.start_pos = tuple(self.start_pos) if self.start_pos else None
         for (c, r), (text, grp) in self.texts.items():
             lv.text(c, r, text, grp)
         for (c, r), cfg in self.triggers.items():
@@ -1461,6 +1469,8 @@ class LevelData:
             j["theme"] = self.theme
         if self.zones:
             j["theme_zones"] = [list(z) for z in self.zones]
+        if self.start_pos:
+            j["start"] = list(self.start_pos)
         if self.difficulty:
             j["difficulty"] = self.difficulty
         if [tuple(p) for p in self.palette] != DEFAULT_PALETTE:
@@ -1524,6 +1534,12 @@ class LevelData:
                 continue
             if th in dict(THEMES) and 0 <= c0 <= c1 < MAX_COLS and 0 <= r0 <= r1 < EDIT_ROWS:
                 d.zones.append([c0, r0, c1, r1, th])
+        try:
+            sc, sr = (int(v) for v in j["start"][:2])
+            if 0 <= sc < MAX_COLS and 0 <= sr < EDIT_ROWS:
+                d.start_pos = (sc, sr)
+        except (KeyError, TypeError, ValueError):
+            pass
         for item in j.get("texts") or []:
             try:
                 c, r, t, g = int(item[0]), int(item[1]), str(item[2]), int(item[3])
@@ -1576,6 +1592,7 @@ def level_to_data(level, name):
         d.bg[(o.col, o.row)] = (o.kind, o.flip, o.group, o.color)
     d.theme = level.theme
     d.zones = [list(z) for z in getattr(level, "theme_zones", [])]
+    d.start_pos = getattr(level, "start_pos", None)
     d.palette = list(level.palette)
     for t in level.texts:
         d.texts[(t.col, t.row)] = (t.text, t.group)
@@ -2988,7 +3005,7 @@ class Player:
     def respawn(self, level, sec):
         mode, _ = level.sections[sec]
         self.section = sec
-        self.x = 3.0 * B if sec == 0 else float(level.starts_px[sec])
+        self.x = level.start_x if sec == 0 else float(level.starts_px[sec])
         self.speed_mult = level.speed_at(self.x)
         self.ceil = level.ceil_y
         self.y = 240.0
@@ -3007,6 +3024,11 @@ class Player:
             self.on_ground = True
         else:
             self.on_ground = False
+        if sec == 0 and level.start_pos:          # a START placed in the editor
+            top = FLOOR - (level.start_pos[1] + 1) * B
+            half = self.h / 2
+            self.y = top + B - half if self.on_ground else top + B / 2
+            self.y = max(level.ceil_y + half, min(FLOOR - half, self.y))
 
     def enter_section(self, idx, game):
         self.section = idx
@@ -4514,7 +4536,7 @@ TAB_DEFS = {
         ("PORTALS", [[("portal:" + m, m.upper()) for m in MODE_ORDER],
                      [("portal:miniwave", "MINI WAVE"), ("finish", "FINISH"),
                       ("grav_d", "GRAV v"), ("grav_u", "GRAV ^"), ("dual_on", "SYMMETRY"),
-                      ("dual_off", "UNSYM"), ("checkpoint", "CHECKPT")]]),
+                      ("dual_off", "UNSYM"), ("checkpoint", "CHECKPT"), ("start", "START")]]),
         ("SPEED", [[("speed:%g" % v, "%gx" % v) for v in SPEED_VALUES], []]),
         ("TRIGGERS", [[("trig:move", "MOVE"), ("trig:reveal", "REVEAL"),
                        ("light:flicker_on", "FLICK ON"), ("light:flicker_off", "FLICK OFF"),
@@ -4545,6 +4567,7 @@ TOOL_HELP = {
     "dual_on": "Symmetry portal - a second you on the other side, same game mode, "
                "inverse gravity",
     "dual_off": "Unsymmetry portal - back to just one of you",
+    "start": "Start - where the player begins (one per level; erase it for the usual spot)",
     "checkpoint": "Checkpoint - put it in a mode portal: practice mode and warping put you "
                   "here instead of the portal's usual spot (invisible in play)",
     "trig:particle": "Particle trigger - a burst (or a stream) of particles",
@@ -4911,6 +4934,9 @@ class Editor:
         elif tool == "finish":
             if col >= SAFE_COLS:
                 d.finish = col
+        elif tool == "start":                    # where the player begins
+            d.start_pos = (col, row)
+            self.say("The player starts here (col %d, row %d)" % (col, row + 1))
         elif tool.startswith("speed:"):
             if col >= SAFE_COLS:
                 d.speeds[col] = float(tool.split(":")[1])
@@ -4991,6 +5017,8 @@ class Editor:
                 del d.speeds[col]
             elif d.finish == col:
                 d.finish = None
+            elif d.start_pos and d.start_pos[0] == col:
+                d.start_pos = None               # (back to the usual start)
 
     def apply_mouse(self, x, y, button, first):
         col, row = self.cell_at(x, y)
@@ -6231,6 +6259,9 @@ class Editor:
             colr = (255, 150, 60) if tool == "dual_on" else (90, 170, 255)
             pygame.draw.ellipse(s, colr, (cx - 7, cy - 11, 14, 22), 3)
             pygame.draw.line(s, (255, 255, 255), (cx - 4, cy), (cx + 4, cy), 2)
+        elif tool == "start":
+            pygame.draw.rect(s, PRIMARY, (cx - 9, cy - 9, 18, 18), 2)
+            pygame.draw.polygon(s, PRIMARY, [(cx - 3, cy - 5), (cx + 5, cy), (cx - 3, cy + 5)])
         elif tool == "checkpoint":
             pygame.draw.line(s, (230, 230, 240), (cx - 6, cy - 10), (cx - 6, cy + 11), 2)
             pygame.draw.polygon(s, (255, 230, 90), [(cx - 5, cy - 10), (cx + 9, cy - 5),
@@ -6370,7 +6401,14 @@ class Editor:
             dim.fill((0, 0, 0, 120))
             s.blit(dim, (0, CEIL))
             s.blit(g.small.render("START ZONE", True, (200, 200, 220)), (8 - cam, CEIL + 24))
-            pygame.draw.rect(s, PRIMARY, (3 * B - 18 - cam, floor_s - 36, 36, 36), 2)
+        # where the player starts
+        sp = self.data.start_pos
+        mx0 = (sp[0] * B + B / 2 if sp else 3 * B) - cam
+        my0 = (self.row_y(sp[1]) + B if sp else floor_s) - 36
+        if -40 < mx0 < W + 40:
+            pygame.draw.rect(s, PRIMARY, (mx0 - 18, my0, 36, 36), 2)
+            st = g.micro.render("START", True, PRIMARY)
+            s.blit(st, (mx0 - st.get_width() // 2, my0 - 13))
 
         acc = ACCENT[secs[0][0]]
         lo, hi = first - 1, first + W // B + 2
