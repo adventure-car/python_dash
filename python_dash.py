@@ -44,7 +44,8 @@ Level select has four tabs (LEFT/RIGHT or click):
                 release; offline it falls back to the ranks built into this file.
   Online        levels in the repo, in three sections: BROWSE (all of them), NEWEST 20
                 (the most recent uploads) and SEARCH (name, maker or description).
-                B / N / F switch sections.  Leaving a level you played from here brings
+                B / N / F switch sections; DIFFICULTY (or T) sorts them easiest / hardest
+                first or shows one rating only.  Leaving a level you played from here brings
                 you back to the same section, search and level.
 
 Uploading your levels
@@ -6479,6 +6480,9 @@ RANKS_TAB = 4
 ONLINE_TAB = 5
 # sections inside the Online tab
 ONLINE_SECTIONS = [("browse", "BROWSE"), ("recent", "NEWEST 20"), ("search", "SEARCH")]
+# the Online tab's difficulty sorter: the normal order, sorted, or only one rating
+DIFF_SORTS = (["all", "easy_first", "hard_first"] + ["only:" + d for d in DIFF_ORDER]
+              + ["only:UNRATED"])
 RECENT_COUNT = 20
 CARD_H, CARD_GAP, CARD_TOP, CARD_X, CARD_W = 68, 8, 104, 50, 860
 HOME_BUTTONS = [("PLAY", (90, 230, 120)), ("BUILD LEVELS", (120, 200, 255)),
@@ -6535,6 +6539,7 @@ class Game:
         self.online_sec = "browse"                # Online tab section: browse / recent / search
         self.online_query = ""                    # what's typed in the search box
         self.online_typing = False                # typing in the search box right now
+        self.online_diff = "all"                  # the difficulty sorter (see DIFF_SORTS)
         self.online_sel = {k: 0 for k, _ in ONLINE_SECTIONS}   # where you were in each one
         self.play_from_online = False             # the level being played came from Online
         self.update_prompt = None                 # "There's an update - download it?"
@@ -7587,6 +7592,10 @@ class Game:
                      "col": (150, 160, 200), "modes": [], "best": None}]
         levels = list(self.online["levels"])
         sec = self.online_sec
+        sort = self.online_diff
+        if sort.startswith("only:"):           # the difficulty sorter: one rating only
+            want = sort.split(":")[1]
+            levels = [lv for lv in levels if (lv.get("rating") or "UNRATED") == want]
         if sec == "recent":                    # newest uploads first
             levels = [lv for lv in levels if lv.get("uploaded")]
             levels.sort(key=lambda lv: lv["uploaded"], reverse=True)
@@ -7603,6 +7612,14 @@ class Game:
                       or q in (lv["author"] or "").lower()
                       or q == (lv.get("rating") or "").lower()
                       or q in (lv.get("description") or "").lower()]
+        if sort in ("easy_first", "hard_first"):     # by difficulty (unrated ones last)
+            def rank(lv):
+                r = lv.get("rating") or "UNRATED"
+                if r not in DIFF_ORDER:
+                    return len(DIFF_ORDER) * 2
+                i = DIFF_ORDER.index(r)
+                return i if sort == "easy_first" else len(DIFF_ORDER) - i
+            levels.sort(key=rank)                    # (stable: same rating keeps its order)
         items = []
         for lv in levels:
             have = os.path.isfile(os.path.join(OTHER_DIR, lv["file"]))
@@ -7631,6 +7648,11 @@ class Game:
                           "coins": (len(self.save.get(key + "#coins", [])), lv.get("coins", 0))
                           if (have or best) else None})
         if not items:
+            if sort.startswith("only:"):
+                return [{"type": "online_msg",
+                         "name": "No %s levels here" % sort.split(":")[1],
+                         "sub": "Click DIFFICULTY (or press T) to pick another one",
+                         "tag": "", "col": (150, 160, 200), "modes": [], "best": None}]
             msg = {"browse": ("No levels online yet", "github.com/%s - levels folder" % REPO),
                    "recent": ("No new uploads yet",
                               "Levels approved from the upload server show up here"),
@@ -8686,10 +8708,24 @@ class Game:
 
     @staticmethod
     def online_sec_rect(i):
-        """The Online tab's section buttons (BROWSE, NEWEST 20) and the search box."""
+        """The Online tab's section buttons (BROWSE, NEWEST 20), the search box, and
+        (i = 3) the difficulty sorter."""
         if i < 2:
             return pygame.Rect(50 + i * 150, 132, 144, 28)
-        return pygame.Rect(350, 132, W - 400, 28)
+        if i == 2:
+            return pygame.Rect(350, 132, 344, 28)
+        return pygame.Rect(700, 132, W - 750, 28)
+
+    def diff_sort_label(self):
+        d = self.online_diff
+        return {"all": "DIFFICULTY: ALL", "easy_first": "EASIEST FIRST",
+                "hard_first": "HARDEST FIRST"}.get(d, "ONLY " + d.split(":")[-1])
+
+    def set_diff_sort(self, step):
+        i = DIFF_SORTS.index(self.online_diff) if self.online_diff in DIFF_SORTS else 0
+        self.online_diff = DIFF_SORTS[(i + step) % len(DIFF_SORTS)]
+        self.online_sel[self.online_sec] = 0
+        self.go_select(0, ONLINE_TAB)
 
     def migrate_accounts(self):
         """Copy accounts made before accounts went online (on this computer, or in a folder
@@ -8750,7 +8786,18 @@ class Game:
                 if self.online_sec_rect(i).collidepoint(e.pos):
                     self.set_online_sec(key, typing=key == "search")
                     return
+            if self.online_sec_rect(3).collidepoint(e.pos):
+                self.online_typing = False
+                self.set_diff_sort(1)
+                return
             self.online_typing = False
+        if online and e.type == pygame.MOUSEBUTTONDOWN and e.button == 3 \
+                and self.online_sec_rect(3).collidepoint(e.pos):
+            self.set_diff_sort(-1)                   # (right-click: back a step)
+            return
+        if online and e.type == pygame.KEYDOWN and e.key == pygame.K_t:
+            self.set_diff_sort(-1 if e.mod & pygame.KMOD_SHIFT else 1)
+            return
         if e.type == pygame.KEYDOWN:
             k = e.key
             if k in (pygame.K_DELETE, pygame.K_BACKSPACE):
@@ -9179,6 +9226,15 @@ class Game:
             t = self.small.render(text, True, colr)
             x = r.x + 12 if key == "search" else r.centerx - t.get_width() // 2
             s.blit(t, (x, r.centery - t.get_height() // 2))
+        r = self.online_sec_rect(3)                  # the difficulty sorter
+        d = self.online_diff
+        on = d != "all"
+        colr = DIFF_COLOR.get(d.split(":")[-1], (255, 230, 90)) if on else (160, 170, 210)
+        pygame.draw.rect(s, (40, 46, 90) if (on or r.collidepoint((mx, my))) else (16, 19, 42),
+                         r, border_radius=8)
+        pygame.draw.rect(s, colr if on else (60, 68, 120), r, 2, border_radius=8)
+        t = self.small.render(self.diff_sort_label(), True, colr if on else (160, 170, 210))
+        s.blit(t, (r.centerx - t.get_width() // 2, r.centery - t.get_height() // 2))
 
     def draw_list(self, title, subtitle, hint):
         s = self.screen
@@ -9298,8 +9354,8 @@ class Game:
         if st == "select":
             if self.tab == ONLINE_TAB:
                 self.draw_list("SELECT A LEVEL", "online levels from github.com/" + REPO,
-                               "B: browse   N: newest   F: search   UP/DOWN: choose   "
-                               "ENTER: download / play   R: refresh   ESC: back")
+                               "B / N / F: browse, newest, search   T: difficulty   "
+                               "UP/DOWN: choose   ENTER: download / play   R: refresh")
             else:
                 self.draw_list("SELECT A LEVEL", "built-in levels, levels you built, and levels "
                                "you downloaded",
