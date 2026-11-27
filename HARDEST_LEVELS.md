@@ -3,7 +3,7 @@
 This explains the two admin-facing systems that the game relies on:
 
 1. **The hardest-levels list** (`hardest_levels.json`) — the official ranks shown in the
-   level select's **Ranks** tab. The Top 1 (entry `0`) is the level whose completion earns
+   level select's **Ranks** tab. The Top 1 (the `"first"` spot) is the level whose completion earns
    the Crown cube.
 2. **Player uploads** — levels players send from inside the game, which an admin reviews and
    adds to the repo.
@@ -19,19 +19,32 @@ level) is done by admins through normal Git / pull requests, protected by `CODEO
 
 ```json
 {
-  "ranks": [
-    {"name": "Velocity Finish", "maker": "AugmentedMagic", "verifier": "AXO",
-     "victors": ["AXO"], "frame_perfects": "0"},
-    ...
-  ]
+  "first": "ingame:Velocity Finish",
+  "second": "online:grief",
+  "third": "ingame:Neon Gauntlet",
+  "sixth": "",
+  ...
+  "twentieth": "",
+  "info": {
+    "ingame:Velocity Finish": {"maker": "AugmentedMagic", "verifier": "AXO",
+                               "victors": ["AXO"], "frame_perfects": "0"},
+    "online:grief": {"maker": "AugmentedMagic", "verifier": "AXO",
+                     "victors": [], "frame_perfects": "0"}
+  }
 }
 ```
 
-- **Order is the ranking, hardest first.** `ranks[0]` is the Top 1 demon.
-- Levels are matched to the game **by `name`** (it must match the level's name exactly —
-  built-in levels and main levels are both eligible).
-- `maker`, `verifier`, `victors`, `frame_perfects` are shown on the Ranks card. They are
-  optional; missing fields show as "unknown" / "none yet".
+- **The spots are the ranking, hardest first:** `"first"` is the Top 1 demon, then
+  `"second"` ... up to `"twentieth"`. **Blank spots (`""`) are skipped** - fill the next
+  one in to add a level.
+- `"ingame:<name>"` is a built-in level or a main level, by its exact name.
+- `"online:<level>"` is a level in the repo's `levels/` folder: its file name without
+  `.json` (like `grief` for `levels/grief.json`), or its level name. Players who haven't
+  downloaded it see it on the Ranks tab with a GET tag; ENTER downloads and plays it.
+- `"info"` holds what the Ranks card shows, keyed by the same text as the spot:
+  `maker`, `verifier`, `victors`, `frame_perfects`. All optional; missing ones show as
+  "unknown" / "none yet".
+- (The older `{"ranks": [{"name": ...}, ...]}` list still works.)
 
 The game fetches this file at startup on a background thread. If it's missing, unreachable,
 or malformed, the game silently falls back to the ranks built into `python_dash.py`, so a

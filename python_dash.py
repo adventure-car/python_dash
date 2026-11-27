@@ -40,8 +40,10 @@ Level select has four tabs (LEFT/RIGHT or click):
                 - shown as "[Level Name] by [Author]" (the author's account name)
   All Levels    everything above
   Ranks         the official hardest-levels list (the Top 1 earns the Crown).  It is read
-                from hardest_levels.json in the repo, so admins can re-rank without a new
-                release; offline it falls back to the ranks built into this file.
+                from hardest_levels.json in the repo ("first" ... "twentieth": an
+                "ingame:" or "online:" level each, blank spots skipped), so admins can
+                re-rank without a new release; offline it falls back to the ranks built
+                into this file.  Ranked online levels you don't have: ENTER downloads them.
   Online        levels in the repo, in three sections: BROWSE (all of them), NEWEST 20
                 (the most recent uploads) and SEARCH (name, maker or description).
                 B / N / F switch sections; DIFFICULTY (or T) sorts them easiest / hardest
@@ -52,7 +54,8 @@ Uploading your levels
 ---------------------
   MY ONLINE LEVELS (on the BUILD LEVELS screen, with a server) lists your levels that are
   online.  Change one's name or description, replace the level with a newer version of
-  it, or ask for a difficulty - AXO or AugmentedMagic check every change first.
+  it, pick a song from the repo's music folder, or ask for a difficulty - AXO or
+  AugmentedMagic check every change first.
   Versions: an approved level is v1.0; a new version of the level itself adds 0.1 (or,
   marked as a major update, goes to the next whole number: v1.4 -> v2.0).  Name,
   description and song changes keep the version.  When a level you downloaded has a
@@ -2771,6 +2774,9 @@ RANKED_LEVELS = [
     dict(name="Inferno Circuit", maker="Claude", verifier="AXO",
          victors=["AXO"], frame_perfects="0"),
 ]
+for _r in RANKED_LEVELS:
+    _r.setdefault("kind", "ingame")
+    _r.setdefault("id", _r["name"])
 TOP_DEMONS = [r["name"] for r in RANKED_LEVELS]          # hardest first: [0] is the Top 1
 
 # Completions earned before a level was added to the game: account name -> 100 percent.
@@ -2824,40 +2830,77 @@ def apply_rank_titles():
                     if _d.name in TOP_DEMONS else _d.name)
 
 
+RANK_SLOTS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
+              "ninth", "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth",
+              "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth",
+              "twentieth"]                       # the hardest-levels list: up to 20
+
+
+def parse_rank_ref(ref):
+    """"online:grief" -> ("online", "grief");  "ingame:Neon Gauntlet" (or just the
+    name) -> ("ingame", "Neon Gauntlet")."""
+    kind, sep, rest = ref.partition(":")
+    if sep and kind.strip().lower() in ("online", "ingame"):
+        return kind.strip().lower(), rest.strip()
+    return "ingame", ref.strip()
+
+
+def _rank_entry(kind, ident, info):
+    info = info if isinstance(info, dict) else {}
+    vic = info.get("victors")
+    return {
+        "kind": kind, "id": ident, "name": ident,
+        "maker": str(info.get("maker", "")).strip() or "unknown",
+        "verifier": str(info.get("verifier", "")).strip() or "unknown",
+        "victors": [str(v).strip() for v in vic if str(v).strip()]
+                   if isinstance(vic, list) else [],
+        "frame_perfects": str(info.get("frame_perfects", "")).strip() or "unknown",
+    }
+
+
 def set_ranks(entries):
     """Replace the official ranks (hardest first) from the GitHub hardest-levels list.
 
-    *entries* is the parsed manifest - a list of level dicts, or a {"ranks": [...]}
-    wrapper.  Returns True if a valid, non-empty list was applied; otherwise the
-    built-in ranks are left untouched and it returns False (so being offline, or a
-    broken file, always falls back to the ranks shipped with the game).
+    The list is {"first": "ingame:Velocity Finish", "second": "online:grief", ...,
+    "twentieth": "", "info": {"ingame:Velocity Finish": {"maker": ..., "verifier": ...,
+    "victors": [...], "frame_perfects": ...}}}.  "ingame:" names a built-in or main
+    level, "online:" a level in the repo's levels/ folder (its file name, or its name).
+    Blank slots are skipped.  (The older {"ranks": [{"name": ...}, ...]} list works too.)
+    Returns True if a valid, non-empty list was applied; otherwise the built-in ranks
+    are left untouched (being offline, or a broken file, falls back to them).
     """
-    if isinstance(entries, dict):
-        entries = entries.get("ranks")
-    if not isinstance(entries, list):
-        return False
     clean = []
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        name = str(e.get("name", "")).strip()
-        if not name:
-            continue
-        vic = e.get("victors")
-        clean.append({
-            "name": name,
-            "maker": str(e.get("maker", "")).strip() or "unknown",
-            "verifier": str(e.get("verifier", "")).strip() or "unknown",
-            "victors": [str(v).strip() for v in vic if str(v).strip()]
-                       if isinstance(vic, list) else [],
-            "frame_perfects": str(e.get("frame_perfects", "")).strip() or "unknown",
-        })
+    if isinstance(entries, dict) and any(k in entries for k in RANK_SLOTS):
+        info = entries.get("info") if isinstance(entries.get("info"), dict) else {}
+        for slot in RANK_SLOTS:
+            ref = entries.get(slot)
+            if not isinstance(ref, str) or not ref.strip():
+                continue                                  # a blank spot: not read
+            kind, ident = parse_rank_ref(ref)
+            if ident:
+                clean.append(_rank_entry(kind, ident, info.get(ref.strip())))
+    else:
+        if isinstance(entries, dict):
+            entries = entries.get("ranks")
+        if not isinstance(entries, list):
+            return False
+        for e in entries:
+            if isinstance(e, dict) and str(e.get("name", "")).strip():
+                clean.append(_rank_entry("ingame", str(e["name"]).strip(), e))
     if not clean:
         return False
     RANKED_LEVELS[:] = clean
     TOP_DEMONS[:] = [r["name"] for r in RANKED_LEVELS]
     apply_rank_titles()
     return True
+
+
+class RankStub:
+    """A ranked online level you haven't downloaded yet (Ranks tab)."""
+    def __init__(self, entry, found):
+        self.entry, self.found = entry, found       # found: the online level, or None
+        self.name = found["name"] if found else entry["id"]
+        self.title, self.key, self.path, self.difficulty = self.name, "", None, "UNRATED"
 
 
 apply_rank_titles()
@@ -6622,6 +6665,7 @@ class Game:
         self.online_sel = {k: 0 for k, _ in ONLINE_SECTIONS}   # where you were in each one
         self.play_from_online = False             # the level being played came from Online
         self.update_prompt = None                 # "There's an update - download it?"
+        self.online_seen = None                   # (Ranks tab: online list status shown)
         self.my_online = {"status": "idle"}       # MY ONLINE LEVELS (from the server)
         self.my_online_shown = None
         self.olform = None                        # the form for changing one of them
@@ -7575,7 +7619,18 @@ class Game:
         by_name = {}
         for d in main + mine + theirs:
             by_name.setdefault(getattr(d, "base_name", d.name), d)
-        ranked = [by_name[r["name"]] for r in RANKED_LEVELS if r["name"] in by_name]
+        ranked, self.rank_entries = [], []
+        for r in RANKED_LEVELS:
+            if r.get("kind") == "online":         # a level from the repo's levels/ folder
+                found = self.find_online(r["id"])
+                d = next((t for t in theirs if found and t.path
+                          and os.path.basename(t.path) == found["file"]), None)
+                d = d or RankStub(r, found)       # (not downloaded yet)
+            else:
+                d = by_name.get(r["id"])
+            if d is not None:
+                ranked.append(d)
+                self.rank_entries.append(r)
         self.tab_lists = [main, mine, theirs, main + mine + theirs, ranked, []]  # [] = Online
 
     def level_item(self, d):
@@ -7616,7 +7671,9 @@ class Game:
             items = self.online_items()
             self.online_sel[self.online_sec] = max(0, min(sel, len(items) - 1))
         elif self.tab == RANKS_TAB:
-            items = [self.rank_item(d) for d in self.levels]
+            if any(r.get("kind") == "online" for r in RANKED_LEVELS):
+                self.fetch_online()                   # (to find the ranked online levels)
+            items = [self.rank_item(d, r) for d, r in zip(self.levels, self.rank_entries)]
         else:
             items = [self.level_item(d) for d in self.levels]
         self.set_list("select", items, sel)
@@ -7918,13 +7975,62 @@ class Game:
         except Exception:
             pass
 
-    def rank_item(self, d):
+    def get_ranked_online(self, stub, i):
+        lv = next((x for x in self.online.get("levels", []) if stub.found
+                   and x["file"] == stub.found["file"]), None)
+        if not lv:
+            self.fetch_online(force=self.online.get("status") == "error")
+            self.say("Looking for it online - try again in a moment")
+            return
+        try:
+            os.makedirs(OTHER_DIR, exist_ok=True)
+            with open(os.path.join(OTHER_DIR, lv["file"]), "wb") as f:
+                f.write(lv["raw"])
+        except OSError:
+            self.say("Couldn't save the level")
+            return
+        song = os.path.basename(lv["music"]) if lv["music"] else ""
+        if song and not music_path(song):
+            threading.Thread(target=self.fetch_level_song, args=(song,), daemon=True).start()
+        self.say("Downloaded %s" % lv["name"])
+        self.go_select(i, RANKS_TAB)
+        self.list_activate(i)
+
+    def find_online(self, ident):
+        """An online level named in the hardest-levels list ("online:<file or name>"):
+        {"file", "name"} from your downloads or the Online list, or None."""
+        want = ident.lower()
+        stem = want[:-5] if want.endswith(".json") else want
+        for d in self.other:                         # downloaded already
+            fn = os.path.basename(d.path or "")
+            if fn.lower()[:-5] == stem or d.name.lower() == want:
+                return {"file": fn, "name": d.name}
+        for lv in self.online.get("levels", []) if self.online.get("status") == "ok" else []:
+            if lv["file"].lower()[:-5] == stem or lv["name"].lower() == want:
+                return {"file": lv["file"], "name": lv["name"]}
+        return None
+
+    def rank_item(self, d, info=None):
         """A level card for the Ranks tab: maker, verifier, victors and frame perfects."""
         base = getattr(d, "base_name", d.name)       # (the name before any rename)
-        info = next((r for r in RANKED_LEVELS if r["name"] == base),
-                    {"maker": "unknown", "verifier": "unknown", "victors": [],
-                     "frame_perfects": "unknown"})
+        info = info or next((r for r in RANKED_LEVELS if r["name"] == base),
+                            {"maker": "unknown", "verifier": "unknown", "victors": [],
+                             "frame_perfects": "unknown"})
+        rank = RANKED_LEVELS.index(info) + 1 if info in RANKED_LEVELS else 0
+        if isinstance(d, RankStub):                  # online, not downloaded yet
+            got = d.found and self.online.get("status") == "ok"
+            return {"type": "rank_get", "name": "#%d  %s" % (rank, d.name),
+                    "sub": "Made by %s     Verified by %s" % (info["maker"], info["verifier"]),
+                    "sub2": "Victors: %s     %s" % (
+                        ", ".join(info["victors"]) or "none yet",
+                        "Online level - ENTER to download it" if got else
+                        "Online level - looking for it..."
+                        if self.online.get("status") == "loading" else
+                        "Online level - not found online"),
+                    "tag": "GET", "col": (120, 200, 255), "modes": [], "best": None}
         it = self.level_item(d)
+        if info.get("kind") == "online" and rank:
+            it["name"] = "#%d  %s" % (rank, d.name)
         it["sub"] = "Made by %s     Verified by %s" % (info["maker"], info["verifier"])
         it["sub2"] = "Victors: %s     Frame perfects: %s" % (
             ", ".join(info["victors"]) or "none yet", info["frame_perfects"])
@@ -8130,13 +8236,20 @@ class Game:
                           "modes": [], "best": None})
         self.set_list("myonline", items, sel)
 
-    OL_ROWS = [("name", "Name"), ("desc", "Description"), ("lvl", "The level"),
-               ("major", "Major update"), ("req", "Ask for a difficulty")]
+    OL_ROWS = [("name", "Name"), ("desc", "Description"), ("song", "Song"),
+               ("lvl", "The level"), ("major", "Major update"), ("req", "Ask for a difficulty")]
+    OL_CHOICES = ("song", "lvl", "major", "req")
+
+    def ol_songs(self):
+        """Songs in the repo's music folder (for the Song choice)."""
+        o = self.online_songs
+        return [n for n, _ in o.get("songs", [])] if o.get("status") == "ok" else []
 
     def open_olform(self, info):
         self.custom = load_custom_levels(LEVEL_DIR)
+        self.fetch_online_songs()                  # (for the Song choice)
         self.olform = {"info": info, "name": info["name"], "desc": info.get("description", ""),
-                       "lvl": 0, "major": False, "req": 0, "sel": 0, "err": "",
+                       "song": 0, "lvl": 0, "major": False, "req": 0, "sel": 0, "err": "",
                        "busy": False, "result": None}
         self.state = "olform"
 
@@ -8147,6 +8260,14 @@ class Game:
             return f["name"]
         if key == "desc":
             return f["desc"] or "(none)"
+        if key == "song":
+            cur = f["info"].get("music") or ""
+            if f["song"] == 0:
+                return "Keep: " + (song_title(cur) if cur else "no song")
+            if f["song"] == 1:
+                return "No song"
+            songs = self.ol_songs()
+            return song_title(songs[f["song"] - 2]) if f["song"] - 2 < len(songs) else "?"
         if key == "lvl":
             return ("Keep the online one" if not f["lvl"]
                     else "Replace with: " + self.custom[f["lvl"] - 1].name)
@@ -8160,7 +8281,9 @@ class Game:
 
     def ol_change(self, key, d):
         f = self.olform
-        if key == "lvl":
+        if key == "song":
+            f["song"] = (f["song"] + d) % (len(self.ol_songs()) + 2)
+        elif key == "lvl":
             f["lvl"] = (f["lvl"] + d) % (len(self.custom) + 1)
         elif key == "major":
             f["major"] = not f["major"]
@@ -8168,9 +8291,9 @@ class Game:
             f["req"] = (f["req"] + d) % (len(MAIN_DIFFICULTIES) + 1)
 
     def ol_geom(self):
-        box = pygame.Rect(0, 0, 800, 400)
-        box.center = (W // 2, H // 2 + 30)
-        rows = [pygame.Rect(box.x + 24, box.y + 66 + i * 50, box.w - 48, 42)
+        box = pygame.Rect(0, 0, 800, 420)
+        box.center = (W // 2, H // 2 + 36)
+        rows = [pygame.Rect(box.x + 24, box.y + 62 + i * 46, box.w - 48, 40)
                 for i in range(len(self.OL_ROWS))]
         send = pygame.Rect(box.x + 24, box.bottom - 58, 220, 42)
         back = pygame.Rect(box.right - 164, box.bottom - 58, 140, 42)
@@ -8185,6 +8308,11 @@ class Game:
                 "description": f["desc"].strip(),
                 "request": MAIN_DIFFICULTIES[f["req"] - 1] if f["req"] else "",
                 "major": f["major"] and bool(f["lvl"])}
+        songs = self.ol_songs()
+        if f["song"] == 1:
+            body["music"] = ""                                     # no song
+        elif f["song"] >= 2 and f["song"] - 2 < len(songs):
+            body["music"] = songs[f["song"] - 2]                   # a song from the repo
         if not body["name"]:
             f["err"] = "The level needs a name"
             return
@@ -8222,7 +8350,7 @@ class Game:
                 if r.collidepoint(e.pos):
                     f["sel"] = i
                     key = self.OL_ROWS[i][0]
-                    if key in ("lvl", "major", "req"):     # click: left half back, right on
+                    if key in self.OL_CHOICES:             # click: left half back, right on
                         self.ol_change(key, -1 if e.pos[0] < r.right - 180 else 1)
             return
         if e.type != pygame.KEYDOWN:
@@ -8241,7 +8369,7 @@ class Game:
                 self.ol_send()
             else:
                 f["sel"] += 1
-        elif key in ("lvl", "major", "req") and k in (pygame.K_LEFT, pygame.K_RIGHT):
+        elif key in self.OL_CHOICES and k in (pygame.K_LEFT, pygame.K_RIGHT):
             self.ol_change(key, -1 if k == pygame.K_LEFT else 1)
         elif key in ("name", "desc"):
             limit = NAME_MAX if key == "name" else DESC_MAX
@@ -8284,7 +8412,7 @@ class Game:
             s.blit(self.font.render(label, True, (120, 125, 160) if dim else (255, 255, 255)),
                    (r.x + 12, r.centery - 9))
             val = self.ol_value(key) + (cursor if on and key in ("name", "desc") else "")
-            if key in ("lvl", "major", "req"):
+            if key in self.OL_CHOICES:
                 val = "<  %s  >" % val
             col = (120, 125, 160) if dim else (DIFF_COLOR.get(val.strip("<> "), (255, 230, 120))
                                                 if key == "req" else (255, 230, 120))
@@ -8304,7 +8432,7 @@ class Game:
             s.blit(tt, (r.centerx - tt.get_width() // 2, r.centery - tt.get_height() // 2))
         h = self.small.render("UP/DOWN: choose   type: name / description   LEFT/RIGHT: change"
                               "   ENTER: next / send   ESC: back", True, (130, 140, 180))
-        s.blit(h, (W // 2 - h.get_width() // 2, H - 22))
+        s.blit(h, (W // 2 - h.get_width() // 2, H - 20))
         self.present()
 
     def card_buttons(self, slot):
@@ -8366,6 +8494,9 @@ class Game:
                 self.online_activate(i)
             else:
                 d = self.levels[i]
+                if isinstance(d, RankStub):           # a ranked online level: get it first
+                    self.get_ranked_online(d, i)
+                    return
                 if (d.key.startswith("other:") and d.path
                         and self.ask_update(os.path.basename(d.path), d.name, i)):
                     return                          # a newer version is online: ask first
@@ -8965,7 +9096,8 @@ class Game:
                 elif sel_state and self.tab == ONLINE_TAB:
                     pass
                 elif sel_state and pygame.K_1 <= k <= pygame.K_9 and k - pygame.K_1 < n:
-                    self.start_level(k - pygame.K_1)
+                    self.sel = k - pygame.K_1
+                    self.list_activate(k - pygame.K_1)
             if self.state in ("select", "mylevels", "settings", "myonline"):
                 self.fix_scroll()
         elif e.type == pygame.MOUSEMOTION:
@@ -9168,6 +9300,13 @@ class Game:
                 self.check_top1()           # the Top 1 demon may have changed
                 if self.state == "select" and self.tab == RANKS_TAB:
                     self.go_select(self.sel, RANKS_TAB)
+        if (self.state == "select" and self.tab == RANKS_TAB
+                and self.online.get("status") in ("ok", "error")
+                and self.online_seen != self.online.get("status")
+                and any(r.get("kind") == "online" for r in RANKED_LEVELS)):
+            self.online_seen = self.online.get("status")      # (ranked online levels found)
+            self.go_select(self.sel, RANKS_TAB)
+            self.check_top1()
         if (self.state == "select" and self.tab == ONLINE_TAB
                 and self.items and self.items[0].get("type") == "online_msg"
                 and self.online["status"] in ("ok", "error")
@@ -9708,9 +9847,20 @@ class Game:
         u = self.save.get("__unlocks__")
         return isinstance(u, dict) and bool(u.get("crown"))
 
+    def top1_beaten(self):
+        if not RANKED_LEVELS:
+            return False
+        r = RANKED_LEVELS[0]
+        if r.get("kind") == "online":                # an online level: your download of it
+            if not hasattr(self, "other"):
+                return False
+            found = self.find_online(r["id"])
+            return bool(found) and self.save.get("other:" + found["file"], 0) >= 100
+        return self.level_beaten(r["id"])
+
     def check_top1(self):
         """Beating whatever level is the Top 1 demon right now earns the Crown."""
-        if TOP_DEMONS and self.level_beaten(TOP_DEMONS[0]) and not self.crown_earned():
+        if self.top1_beaten() and not self.crown_earned():
             u = self.save.get("__unlocks__")
             u = dict(u) if isinstance(u, dict) else {}
             u["crown"] = True
