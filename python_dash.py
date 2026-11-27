@@ -49,6 +49,13 @@ Level select has four tabs (LEFT/RIGHT or click):
 
 Uploading your levels
 ---------------------
+  MY ONLINE LEVELS (on the BUILD LEVELS screen, with a server) lists your levels that are
+  online.  Change one's name or description, replace the level with a newer version of
+  it, or ask for a difficulty - AXO or AugmentedMagic check every change first.
+  Versions: an approved level is v1.0; a new version of the level itself adds 0.1 (or,
+  marked as a major update, goes to the next whole number: v1.4 -> v2.0).  Name,
+  description and song changes keep the version.  When a level you downloaded has a
+  newer version online, the Online and Downloaded tabs say so and ask to download it.
   On the BUILD LEVELS (Your Levels) screen, press U to upload the selected level.  With a
   server (SERVER_URL) it goes there for AXO or AugmentedMagic to review.  Otherwise it is
   sent into the shared online folder (PythonDashSubmissions/) as a request - an admin reviews
@@ -4248,6 +4255,40 @@ def fetch_hardest(out):
         out["status"] = "error"
 
 
+def parse_version(v):
+    """A level's version "1.4" as (1, 4).  Levels without one are 1.0."""
+    try:
+        a, b = str(v or "1.0").split(".")[:2]
+        return max(1, int(a)), max(0, int(b))
+    except (ValueError, TypeError):
+        return 1, 0
+
+
+def version_str(v):
+    return "%d.%d" % parse_version(v)
+
+
+_local_versions = {}            # path -> (file time, version)
+
+
+def local_version(path):
+    """The version of a downloaded level file (cached until the file changes)."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    hit = _local_versions.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        with open(path) as f:
+            v = version_str(json.load(f).get("version"))
+    except (OSError, ValueError, AttributeError):
+        v = None
+    _local_versions[path] = (mtime, v)
+    return v
+
+
 def sync_downloaded_rating(fn, rating):
     """A level rated (or re-rated) after you downloaded it: give your copy that rating
     too, so the Downloaded Levels tab shows it.  Nothing else in your copy changes."""
@@ -4281,6 +4322,7 @@ def fetch_online_levels(out):
                               "coins": sum(1 for v in d.cells.values() if v[0] == "coin"),
                               "music": j.get("music") or "", "description": d.description,
                               "uploaded": str(j.get("uploaded_at") or ""),
+                              "version": version_str(j.get("version")),
                               "rating": level_rating(d)})
                 sync_downloaded_rating(fn, d.difficulty)
             except Exception:
@@ -6495,6 +6537,11 @@ class Game:
         self.online_typing = False                # typing in the search box right now
         self.online_sel = {k: 0 for k, _ in ONLINE_SECTIONS}   # where you were in each one
         self.play_from_online = False             # the level being played came from Online
+        self.update_prompt = None                 # "There's an update - download it?"
+        self.my_online = {"status": "idle"}       # MY ONLINE LEVELS (from the server)
+        self.my_online_shown = None
+        self.olform = None                        # the form for changing one of them
+        self.update_ok = None                     # (answered "play mine" for this file)
         self.online_songs = {"status": "idle"}    # online music
         self.hardest = {"status": "idle"}          # curated hardest-levels list from GitHub
         self.hardest_applied = False
@@ -7453,6 +7500,14 @@ class Game:
         return self.level_item_raw(d)
 
     def level_item_raw(self, d):
+        upd = self.update_for(os.path.basename(d.path)) \
+            if d.key.startswith("other:") and d.path else None
+        if upd:                                 # a downloaded level with a newer version
+            return {"name": d.title, "sub": "UPDATE AVAILABLE: v%s -> v%s  -  %s" % (
+                upd + (d.blurb,)), "tag": "UPDATE", "col": (255, 200, 60),
+                "modes": self.level_modes(d), "best": self.save.get(d.key, 0),
+                "path": d.path,
+                "coins": (len(self.save.get(d.key + "#coins", [])), self.level_coins(d))}
         return {"name": d.title, "sub": d.blurb, "tag": d.difficulty,
                 "col": DIFF_COLOR[d.difficulty], "modes": self.level_modes(d),
                 "best": self.save.get(d.key, 0), "path": d.path,
@@ -7555,13 +7610,21 @@ class Game:
             rating = lv.get("rating") or "UNRATED"
             key = "other:" + lv["file"]            # (custom_def's key for downloaded levels)
             best = self.save.get(key, 0)
-            items.append({"type": "online", "info": lv, "name": title,
-                          "sub": (("COMPLETE - ENTER to play again" if best >= 100 else
-                                   "Downloaded - ENTER to play") if have else
-                                  "%d objects%s  -  ENTER to download" % (
-                                      lv["objects"], "  -  has music" if lv["music"] else "")),
-                          "tag": rating,
-                          "col": DIFF_COLOR.get(rating, (120, 200, 255)),
+            upd = self.update_for(lv["file"])
+            if upd:
+                sub = "UPDATE: v%s -> v%s  -  ENTER to get it" % upd
+            elif have:
+                sub = "v%s  -  %s" % (lv.get("version", "1.0"),
+                                      "COMPLETE - ENTER to play again" if best >= 100 else
+                                      "Downloaded - ENTER to play")
+            else:
+                sub = "v%s  -  %d objects%s  -  ENTER to download" % (
+                    lv.get("version", "1.0"), lv["objects"],
+                    "  -  has music" if lv["music"] else "")
+            items.append({"type": "online", "info": lv, "name": title, "sub": sub,
+                          "tag": "UPDATE" if upd else rating,
+                          "col": (255, 200, 60) if upd else DIFF_COLOR.get(rating,
+                                                                          (120, 200, 255)),
                           "modes": [m for m in lv["modes"] if m in ACCENT],
                           # your progress - the same as on the Downloaded Levels tab
                           "best": best if (have or best) else None,
@@ -7576,6 +7639,109 @@ class Game:
             items = [{"type": "online_msg", "name": msg[0], "sub": msg[1], "tag": "",
                       "col": (150, 160, 200), "modes": [], "best": None}]
         return items
+
+    def update_for(self, fn):
+        """(your version, online version) if a level you downloaded has a newer version
+        online, else None."""
+        if self.online.get("status") != "ok":
+            return None
+        lv = next((x for x in self.online["levels"] if x["file"] == fn), None)
+        mine = local_version(os.path.join(OTHER_DIR, os.path.basename(fn))) if lv else None
+        if mine and parse_version(lv.get("version")) > parse_version(mine):
+            return mine, version_str(lv.get("version"))
+        return None
+
+    def download_update(self, fn):
+        """Replace your copy of a downloaded level with the newer one online (your
+        progress on it stays)."""
+        lv = next((x for x in self.online.get("levels", []) if x["file"] == fn), None)
+        if not lv:
+            return False
+        try:
+            with open(os.path.join(OTHER_DIR, os.path.basename(fn)), "wb") as f:
+                f.write(lv["raw"])
+        except OSError:
+            self.say("Couldn't save the update")
+            return False
+        song = os.path.basename(lv["music"]) if lv["music"] else ""
+        if song and not music_path(song):
+            threading.Thread(target=self.fetch_level_song, args=(song,), daemon=True).start()
+        self.say("Updated %s to v%s" % (lv["name"], version_str(lv.get("version"))))
+        return True
+
+    def update_prompt_event(self, e):
+        """Keys for "There's an update - download it?"."""
+        if e.type != pygame.KEYDOWN and not (e.type == pygame.MOUSEBUTTONDOWN
+                                             and e.button == 1):
+            return
+        p = self.update_prompt
+        yes_r, no_r = self.update_prompt_buttons()
+        if e.type == pygame.MOUSEBUTTONDOWN:
+            choice = "y" if yes_r.collidepoint(e.pos) else "n" if no_r.collidepoint(e.pos) \
+                else None
+        else:
+            choice = ("y" if e.key in (pygame.K_y, pygame.K_RETURN, pygame.K_KP_ENTER) else
+                      "n" if e.key == pygame.K_n else
+                      "x" if e.key == pygame.K_ESCAPE else None)
+        if not choice:
+            return
+        self.update_prompt = None
+        if choice == "x":
+            return
+        if choice == "y" and not self.download_update(p["file"]):
+            return
+        tab, i = p["tab"], p["i"]
+        self.go_select(i, tab)              # (picks up the new version)
+        self.update_ok = p["file"]          # then play it (only asked once)
+        self.list_activate(i)
+
+    def update_prompt_buttons(self):
+        box = pygame.Rect(0, 0, 560, 190)
+        box.center = (W // 2, H // 2 + 20)
+        return (pygame.Rect(box.x + 30, box.bottom - 62, 230, 42),
+                pygame.Rect(box.right - 260, box.bottom - 62, 230, 42))
+
+    def draw_update_prompt(self):
+        s = self.screen
+        p = self.update_prompt
+        veil = pygame.Surface((W, H), pygame.SRCALPHA)
+        veil.fill((0, 0, 0, 160))
+        s.blit(veil, (0, 0))
+        box = pygame.Rect(0, 0, 560, 190)
+        box.center = (W // 2, H // 2 + 20)
+        pygame.draw.rect(s, (20, 24, 50), box, border_radius=14)
+        pygame.draw.rect(s, (255, 200, 60), box, 3, border_radius=14)
+        t = self.mid.render("Update available!", True, (255, 255, 255))
+        s.blit(t, (box.centerx - t.get_width() // 2, box.y + 16))
+        t2 = self.font.render("%s: you have v%s, v%s is online" % (p["name"], p["mine"],
+                                                                    p["new"]),
+                              True, (200, 205, 235))
+        s.blit(t2, (box.centerx - t2.get_width() // 2, box.y + 62))
+        t3 = self.small.render("Download it?  (your progress on it stays)", True,
+                               (150, 160, 200))
+        s.blit(t3, (box.centerx - t3.get_width() // 2, box.y + 92))
+        mx, my = pygame.mouse.get_pos()
+        for r, label, col in zip(self.update_prompt_buttons(),
+                                 ("Y: DOWNLOAD IT", "N: PLAY MINE"),
+                                 ((90, 230, 120), (200, 205, 230))):
+            hov = r.collidepoint((mx, my))
+            pygame.draw.rect(s, (34, 40, 80) if hov else (16, 19, 42), r, border_radius=10)
+            pygame.draw.rect(s, col, r, 3 if hov else 2, border_radius=10)
+            tt = self.font.render(label, True, col)
+            s.blit(tt, (r.centerx - tt.get_width() // 2, r.centery - tt.get_height() // 2))
+
+    def ask_update(self, fn, name, i):
+        """If a downloaded level has a newer version online, ask about it first (once
+        per time you pick it).  True if it asked."""
+        if self.update_ok == fn:
+            self.update_ok = None
+            return False
+        upd = self.update_for(fn)
+        if not upd:
+            return False
+        self.update_prompt = {"file": fn, "name": name, "mine": upd[0], "new": upd[1],
+                              "tab": self.tab, "i": i}
+        return True
 
     def set_online_sec(self, sec, typing=False):
         """Switch the Online tab's section, back to where you were in it."""
@@ -7628,6 +7794,8 @@ class Game:
             self.say(msg + "  (ENTER to play)")
             self.go_select(i, ONLINE_TAB)
             return
+        if self.ask_update(lv["file"], lv["name"], i):     # a newer version is online
+            return
         # Play it straight from here: leaving the level comes back to this same spot
         # in the Online tab (the section, search and level you had picked).
         try:
@@ -7674,6 +7842,12 @@ class Game:
             items.append({"type": "templates", "name": "COPY A LEVEL",
                           "sub": "Use a built-in or imported level as a starting point",
                           "tag": "TEMPLATE", "col": (120, 200, 255), "modes": [], "best": None})
+            if SERVER_ON:
+                items.append({"type": "myonline", "name": "MY ONLINE LEVELS",
+                              "sub": "Your levels that are online: change their name, "
+                                     "description or the level, or ask for a difficulty",
+                              "tag": "ONLINE", "col": (255, 200, 90), "modes": [],
+                              "best": None})
             for d in self.custom:
                 items.append({"type": "custom", "data": d, "name": d.name, "path": d.path,
                               "sub": d.description or "%d objects" % d.object_count(),
@@ -7810,6 +7984,226 @@ class Game:
                 self.say("Upload failed: %s" % ex)
         threading.Thread(target=send, daemon=True).start()
 
+    # ---- MY ONLINE LEVELS: change a level of yours that's online -------------------
+    def go_myonline(self):
+        if not self.server_user:
+            self.say("Sign in first to see your online levels")
+            return
+        self.my_online = {"status": "loading"}
+        out, token = self.my_online, self.server_user["token"]
+
+        def fetch():
+            try:
+                out["levels"] = server_call("GET", "/api/my_levels", token=token)["levels"]
+                out["status"] = "ok"
+            except (ServerError, KeyError, TypeError) as ex:
+                out["err"] = str(ex)
+                out["status"] = "error"
+        threading.Thread(target=fetch, daemon=True).start()
+        self.show_myonline()
+
+    def show_myonline(self, sel=0):
+        o = self.my_online
+        self.my_online_shown = (id(o), o.get("status"))
+        st = o.get("status")
+        if st != "ok" or not o.get("levels"):
+            msg = {"loading": ("Asking the server for your levels...", ""),
+                   "error": (o.get("err", "Couldn't get your levels"), "R: try again"),
+                   "ok": ("You don't have any levels online yet",
+                          "Upload one with U on the BUILD LEVELS screen")}.get(st, ("", ""))
+            self.set_list("myonline", [{"type": "online_msg", "name": msg[0], "sub": msg[1],
+                                        "tag": "", "col": (150, 160, 200), "modes": [],
+                                        "best": None}])
+            return
+        items = []
+        for lv in o["levels"]:
+            rating = lv.get("rating") or "UNRATED"
+            sub = "v%s  -  %s" % (lv.get("version", "1.0"),
+                                  lv.get("description") or "no description")
+            if lv.get("pending"):
+                sub = "v%s  -  your change is waiting for review" % lv.get("version", "1.0")
+            items.append({"type": "my_online", "info": lv, "name": lv["name"], "sub": sub,
+                          "tag": rating, "col": DIFF_COLOR.get(rating, (150, 155, 185)),
+                          "modes": [], "best": None})
+        self.set_list("myonline", items, sel)
+
+    OL_ROWS = [("name", "Name"), ("desc", "Description"), ("lvl", "The level"),
+               ("major", "Major update"), ("req", "Ask for a difficulty")]
+
+    def open_olform(self, info):
+        self.custom = load_custom_levels(LEVEL_DIR)
+        self.olform = {"info": info, "name": info["name"], "desc": info.get("description", ""),
+                       "lvl": 0, "major": False, "req": 0, "sel": 0, "err": "",
+                       "busy": False, "result": None}
+        self.state = "olform"
+
+    def ol_value(self, key):
+        f = self.olform
+        v = f["info"].get("version", "1.0")
+        if key == "name":
+            return f["name"]
+        if key == "desc":
+            return f["desc"] or "(none)"
+        if key == "lvl":
+            return ("Keep the online one" if not f["lvl"]
+                    else "Replace with: " + self.custom[f["lvl"] - 1].name)
+        if key == "major":
+            if not f["lvl"]:
+                return "(only for a new level)"
+            a, b = parse_version(v)
+            return ("YES  -  v%s -> v%d.0" % (v, a + 1) if f["major"]
+                    else "no  -  v%s -> v%d.%d" % (v, a, b + 1))
+        return "No request" if not f["req"] else MAIN_DIFFICULTIES[f["req"] - 1]
+
+    def ol_change(self, key, d):
+        f = self.olform
+        if key == "lvl":
+            f["lvl"] = (f["lvl"] + d) % (len(self.custom) + 1)
+        elif key == "major":
+            f["major"] = not f["major"]
+        elif key == "req":
+            f["req"] = (f["req"] + d) % (len(MAIN_DIFFICULTIES) + 1)
+
+    def ol_geom(self):
+        box = pygame.Rect(0, 0, 800, 400)
+        box.center = (W // 2, H // 2 + 30)
+        rows = [pygame.Rect(box.x + 24, box.y + 66 + i * 50, box.w - 48, 42)
+                for i in range(len(self.OL_ROWS))]
+        send = pygame.Rect(box.x + 24, box.bottom - 58, 220, 42)
+        back = pygame.Rect(box.right - 164, box.bottom - 58, 140, 42)
+        return box, rows, send, back
+
+    def ol_send(self):
+        f = self.olform
+        if f["busy"]:
+            return
+        info = f["info"]
+        body = {"path": info["path"], "name": " ".join(f["name"].split()),
+                "description": f["desc"].strip(),
+                "request": MAIN_DIFFICULTIES[f["req"] - 1] if f["req"] else "",
+                "major": f["major"] and bool(f["lvl"])}
+        if not body["name"]:
+            f["err"] = "The level needs a name"
+            return
+        if f["lvl"]:
+            data = self.custom[f["lvl"] - 1]
+            data.author = self.account or ""
+            try:
+                body["level"] = data.to_json(embed_music=True)      # (its song goes too)
+            except OSError:
+                f["err"] = "Couldn't read that level"
+                return
+        f["busy"], f["err"] = True, ""
+        token = self.server_user["token"] if self.server_user else None
+
+        def send():
+            try:
+                r = server_call("POST", "/api/my_levels/update", body, token, timeout=120)
+                f["result"] = (True, "Sent! AXO or AugmentedMagic will check it"
+                               + ("  (it'll be v%s)" % r["version"]
+                                  if r.get("version") != info.get("version") else ""))
+            except ServerError as ex:
+                f["result"] = (False, str(ex))
+        threading.Thread(target=send, daemon=True).start()
+
+    def olform_event(self, e):
+        f = self.olform
+        n = len(self.OL_ROWS)
+        box, rows, send_r, back_r = self.ol_geom()
+        if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            if send_r.collidepoint(e.pos):
+                self.ol_send()
+            elif back_r.collidepoint(e.pos):
+                self.go_myonline()
+            for i, r in enumerate(rows):
+                if r.collidepoint(e.pos):
+                    f["sel"] = i
+                    key = self.OL_ROWS[i][0]
+                    if key in ("lvl", "major", "req"):     # click: left half back, right on
+                        self.ol_change(key, -1 if e.pos[0] < r.right - 180 else 1)
+            return
+        if e.type != pygame.KEYDOWN:
+            return
+        k = e.key
+        key = self.OL_ROWS[f["sel"]][0] if f["sel"] < n else None
+        cmd = e.mod & (pygame.KMOD_CTRL | pygame.KMOD_META)
+        if k == pygame.K_ESCAPE:
+            self.go_myonline()
+        elif k in (pygame.K_UP,):
+            f["sel"] = (f["sel"] - 1) % (n + 1)
+        elif k in (pygame.K_DOWN, pygame.K_TAB):
+            f["sel"] = (f["sel"] + 1) % (n + 1)
+        elif k in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            if f["sel"] == n:
+                self.ol_send()
+            else:
+                f["sel"] += 1
+        elif key in ("lvl", "major", "req") and k in (pygame.K_LEFT, pygame.K_RIGHT):
+            self.ol_change(key, -1 if k == pygame.K_LEFT else 1)
+        elif key in ("name", "desc"):
+            limit = NAME_MAX if key == "name" else DESC_MAX
+            if k == pygame.K_BACKSPACE:
+                f[key] = f[key][:-1]
+            elif cmd and k == pygame.K_v:
+                f[key] = (f[key] + self.clipboard_text())[:limit]
+            elif e.unicode and e.unicode.isprintable() and not cmd and len(f[key]) < limit:
+                f[key] += e.unicode
+            f["err"] = ""
+
+    def draw_olform(self):
+        s = self.screen
+        f = self.olform
+        info = f["info"]
+        self.draw_menu_bg()
+        t = self.big.render("CHANGE A LEVEL", True, (255, 255, 255))
+        s.blit(t, (W // 2 - t.get_width() // 2, 4))
+        box, rows, send_r, back_r = self.ol_geom()
+        rating = info.get("rating") or "UNRATED"
+        pygame.draw.rect(s, (20, 24, 50), box, border_radius=14)
+        pygame.draw.rect(s, DIFF_COLOR.get(rating, (150, 155, 185)), box, 3, border_radius=14)
+        head = "%s  -  v%s  -  %s  -  online as %s" % (info["name"], info.get("version", "1.0"),
+                                                      rating, info["path"])
+        ht = self.small.render(head, True, (170, 180, 220))
+        s.blit(ht, (box.centerx - ht.get_width() // 2, box.y + 14))
+        if f["err"]:
+            et = self.font.render(f["err"], True, (255, 110, 110))
+            s.blit(et, (box.centerx - et.get_width() // 2, box.y + 36))
+        elif info.get("pending"):
+            pt = self.small.render("You already asked for a change - sending again replaces it",
+                                   True, (255, 200, 90))
+            s.blit(pt, (box.centerx - pt.get_width() // 2, box.y + 38))
+        cursor = "|" if (pygame.time.get_ticks() // 450) % 2 == 0 else ""
+        for i, ((key, label), r) in enumerate(zip(self.OL_ROWS, rows)):
+            on = i == f["sel"]
+            dim = key == "major" and not f["lvl"]
+            pygame.draw.rect(s, (40, 46, 90) if on else (16, 19, 42), r, border_radius=8)
+            pygame.draw.rect(s, (255, 230, 90) if on else (60, 68, 120), r, 2, border_radius=8)
+            s.blit(self.font.render(label, True, (120, 125, 160) if dim else (255, 255, 255)),
+                   (r.x + 12, r.centery - 9))
+            val = self.ol_value(key) + (cursor if on and key in ("name", "desc") else "")
+            if key in ("lvl", "major", "req"):
+                val = "<  %s  >" % val
+            col = (120, 125, 160) if dim else (DIFF_COLOR.get(val.strip("<> "), (255, 230, 120))
+                                                if key == "req" else (255, 230, 120))
+            vt = self.font.render(val, True, col)
+            while vt.get_width() > r.w - 230 and len(val) > 4:      # (long descriptions)
+                val = val[:-2]
+                vt = self.font.render(val + "...", True, col)
+            s.blit(vt, (r.right - 12 - vt.get_width(), r.centery - 9))
+        mx, my = pygame.mouse.get_pos()
+        for r, label, col, i in ((send_r, "SENDING..." if f["busy"] else "SEND FOR REVIEW",
+                                  (90, 230, 120), len(self.OL_ROWS)),
+                                 (back_r, "BACK", (200, 205, 230), -1)):
+            hov = r.collidepoint((mx, my)) or f["sel"] == i
+            pygame.draw.rect(s, (34, 40, 80) if hov else (16, 19, 42), r, border_radius=10)
+            pygame.draw.rect(s, col, r, 3 if hov else 2, border_radius=10)
+            tt = self.font.render(label, True, col)
+            s.blit(tt, (r.centerx - tt.get_width() // 2, r.centery - tt.get_height() // 2))
+        h = self.small.render("UP/DOWN: choose   type: name / description   LEFT/RIGHT: change"
+                              "   ENTER: next / send   ESC: back", True, (130, 140, 180))
+        s.blit(h, (W // 2 - h.get_width() // 2, H - 22))
+        self.present()
+
     def card_buttons(self, slot):
         r = self.card_rect(slot)
         return {"copy": pygame.Rect(r.right - 176, r.bottom - 34, 76, 24),
@@ -7868,6 +8262,10 @@ class Game:
             if self.tab == ONLINE_TAB:
                 self.online_activate(i)
             else:
+                d = self.levels[i]
+                if (d.key.startswith("other:") and d.path
+                        and self.ask_update(os.path.basename(d.path), d.name, i)):
+                    return                          # a newer version is online: ask first
                 self.start_level(i)
             return
         it = self.items[i]
@@ -7905,6 +8303,10 @@ class Game:
             self.open_editor(LevelData("My Level"), named=False)
         elif t == "templates":
             self.go_mylevels("templates")
+        elif t == "myonline":
+            self.go_myonline()
+        elif t == "my_online":
+            self.open_olform(it["info"])
         elif t == "custom":
             self.open_editor(it["data"], named=True)
         elif t == "template":
@@ -7919,6 +8321,8 @@ class Game:
             self.go_mylevels("list")
         elif self.state == "admin":
             self.go_home()
+        elif self.state == "myonline":
+            self.go_mylevels("list", 2)
         else:
             self.go_home()
 
@@ -8186,7 +8590,9 @@ class Game:
             self.home_event(e)
         elif st == "mainsetup":
             self.msetup_event(e)
-        elif st in ("select", "mylevels", "settings", "admin"):
+        elif st == "olform":
+            self.olform_event(e)
+        elif st in ("select", "mylevels", "settings", "admin", "myonline"):
             self.list_event(e)
         elif st == "editor":
             self.editor.handle(e)
@@ -8326,6 +8732,9 @@ class Game:
                    "(Google Drive, Dropbox or OneDrive) - move python_dash.py there")
 
     def list_event(self, e):
+        if self.update_prompt and self.state == "select":
+            self.update_prompt_event(e)
+            return
         n = len(self.items)
         online = self.state == "select" and self.tab == ONLINE_TAB
         if online and self.online_typing and e.type == pygame.KEYDOWN:
@@ -8363,6 +8772,8 @@ class Game:
                     self.export_selected()
                 elif self.state == "mylevels" and k == pygame.K_u:
                     self.upload_selected()
+                elif self.state == "myonline" and k == pygame.K_r:
+                    self.go_myonline()
                 elif n == 0:
                     pass
                 elif k in (pygame.K_UP, pygame.K_w):
@@ -8378,7 +8789,7 @@ class Game:
                     pass
                 elif sel_state and pygame.K_1 <= k <= pygame.K_9 and k - pygame.K_1 < n:
                     self.start_level(k - pygame.K_1)
-            if self.state in ("select", "mylevels", "settings"):
+            if self.state in ("select", "mylevels", "settings", "myonline"):
                 self.fix_scroll()
         elif e.type == pygame.MOUSEMOTION:
             i = self.card_at(e.pos)
@@ -8554,6 +8965,18 @@ class Game:
     def update(self):
         self.menu_t += 1
         self.server_sync_update()
+        if self.state == "myonline" and self.my_online_shown != (
+                id(self.my_online), self.my_online.get("status")):
+            self.show_myonline(self.sel)          # (the list arrived from the server)
+        if self.state == "olform" and self.olform.get("result"):
+            ok, msg = self.olform["result"]
+            self.olform["result"] = None
+            self.olform["busy"] = False
+            if ok:
+                self.say(msg)
+                self.go_myonline()
+            else:
+                self.olform["err"] = msg
         if self.hardest["status"] == "ok" and not self.hardest_applied:
             self.hardest_applied = True
             if set_ranks(self.hardest.get("ranks", [])):
@@ -8855,6 +9278,8 @@ class Game:
                                                      (26, yb - 8)])
         h = self.small.render(hint, True, (130, 140, 180))
         s.blit(h, (W // 2 - h.get_width() // 2, H - 26))
+        if self.update_prompt and self.state == "select":
+            self.draw_update_prompt()
         self.present()
 
     # ---- drawing: gameplay -----------------------------------------------------------
@@ -8909,6 +9334,14 @@ class Game:
             return
         if st == "mainsetup":
             self.draw_msetup()
+            return
+        if st == "myonline":
+            self.draw_list("MY ONLINE LEVELS", "your levels that are online now - every "
+                           "change is checked by AXO or AugmentedMagic first",
+                           "ENTER / click: view and change   R: refresh   ESC: back")
+            return
+        if st == "olform":
+            self.draw_olform()
             return
 
         s = self.screen
