@@ -183,6 +183,7 @@ import random
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -4340,15 +4341,22 @@ def fetch_repo_main_levels(out):
         out["err"] = str(ex)
 
 
-def fetch_hardest(out):
+def fetch_hardest(out, fresh=False):
     """Download the curated hardest-levels list from the repo (read-only).  Fills *out*
-    with {"status": "ok", "ranks": [...]} or {"status": "error", ...}."""
+    with {"status": "ok", "ranks": <the list>} or {"status": "error", ...}.  The list is
+    the {"first": ..., "second": ...} file (or the older {"ranks": [...]}) - set_ranks
+    reads either.  fresh=True skips GitHub's copy that can be a few minutes old."""
     try:
         url = "https://raw.githubusercontent.com/%s/%s/%s" % (REPO, REPO_BRANCH, HARDEST_FILE)
+        if fresh:
+            url += "?t=%d" % int(time.time())
         data = json.loads(http_get(url).decode("utf-8"))
-        ranks = data.get("ranks") if isinstance(data, dict) else data
-        if not isinstance(ranks, list):
-            raise ValueError("hardest_levels.json has no ranks list")
+        if isinstance(data, dict) and any(k in data for k in RANK_SLOTS):
+            ranks = data                                  # the {"first": ...} list
+        else:
+            ranks = data.get("ranks") if isinstance(data, dict) else data
+            if not isinstance(ranks, list):
+                raise ValueError("hardest_levels.json has no ranks in it")
         out["ranks"] = ranks
         out["status"] = "ok"
     except Exception as e:
@@ -6675,6 +6683,8 @@ class Game:
         self.online_songs = {"status": "idle"}    # online music
         self.hardest = {"status": "idle"}          # curated hardest-levels list from GitHub
         self.hardest_applied = False
+        self.ranks_time = None                     # when the list came from GitHub
+        self.ranks_reload_asked = False            # (R on the Ranks tab: say how it went)
         self.start_hardest_fetch()                 # refresh the ranks in the background
         self.repo_main = {"status": "loading"}     # main levels from the repo's main_levels/
         self.repo_main_applied = False
@@ -7719,7 +7729,43 @@ class Game:
             return
         self.hardest = {"status": "loading"}
         self.hardest_applied = False
-        threading.Thread(target=fetch_hardest, args=(self.hardest,), daemon=True).start()
+        threading.Thread(target=fetch_hardest, args=(self.hardest, force),
+                         daemon=True).start()
+
+    def reload_ranks(self):
+        """Ranks tab: R / RELOAD RANKS - get the hardest-levels list (and the online
+        levels it names) from GitHub again."""
+        self.start_hardest_fetch(force=True)
+        if any(r.get("kind") == "online" for r in RANKED_LEVELS):
+            self.fetch_online(force=True)          # (ranked online levels: fresh copies)
+        self.ranks_reload_asked = True
+        self.say("Reloading the ranks...")
+        self.go_select(self.sel, RANKS_TAB)
+
+    def ranks_bar_rect(self):
+        return pygame.Rect(50, 132, 210, 28)
+
+    def draw_ranks_bar(self):
+        s = self.screen
+        r = self.ranks_bar_rect()
+        hov = r.collidepoint(pygame.mouse.get_pos())
+        loading = self.hardest.get("status") == "loading"
+        pygame.draw.rect(s, (40, 46, 90) if hov else (16, 19, 42), r, border_radius=8)
+        pygame.draw.rect(s, (255, 230, 90) if hov else (60, 68, 120), r, 2, border_radius=8)
+        t = self.small.render("RELOADING..." if loading else "RELOAD RANKS  (R)", True,
+                              (255, 255, 255))
+        s.blit(t, (r.centerx - t.get_width() // 2, r.centery - t.get_height() // 2))
+        if loading:
+            msg = "Getting the hardest-levels list from GitHub..."
+        elif self.ranks_time:
+            ago = int(time.time() - self.ranks_time)
+            msg = "From GitHub, loaded %s" % ("just now" if ago < 60 else
+                                              "%d min ago" % (ago // 60) if ago < 3600 else
+                                              "%d h ago" % (ago // 3600))
+        else:
+            msg = "Couldn't reach GitHub - showing the ranks built into the game"
+        mt = self.small.render(msg, True, (150, 160, 200))
+        s.blit(mt, (r.right + 14, r.centery - mt.get_height() // 2))
 
     def online_items(self):
         st = self.online["status"]
@@ -8953,7 +8999,7 @@ class Game:
     def card_geom(self):
         """(top, card height, gap): the level-select screen has a tab bar above its cards."""
         if self.state == "select":
-            return (166, 64, 4) if self.tab == ONLINE_TAB else (134, 64, 4)
+            return (166, 64, 4) if self.tab in (ONLINE_TAB, RANKS_TAB) else (134, 64, 4)
         return (CARD_TOP, CARD_H, CARD_GAP)
 
     def card_rect(self, slot):
@@ -9143,6 +9189,10 @@ class Game:
         if self.update_prompt and self.state == "select":
             self.update_prompt_event(e)
             return
+        if (self.state == "select" and self.tab == RANKS_TAB and e.type == pygame.MOUSEBUTTONDOWN
+                and e.button == 1 and self.ranks_bar_rect().collidepoint(e.pos)):
+            self.reload_ranks()
+            return
         n = len(self.items)
         online = self.state == "select" and self.tab == ONLINE_TAB
         if online and self.online_typing and e.type == pygame.KEYDOWN:
@@ -9207,6 +9257,8 @@ class Game:
                 elif sel_state and self.tab == ONLINE_TAB and k == pygame.K_r:
                     self.fetch_online(force=True)
                     self.go_select(self.sel, ONLINE_TAB)
+                elif sel_state and self.tab == RANKS_TAB and k == pygame.K_r:
+                    self.reload_ranks()
                 elif sel_state and self.tab == ONLINE_TAB:
                     pass
                 elif sel_state and pygame.K_1 <= k <= pygame.K_9 and k - pygame.K_1 < n:
@@ -9411,9 +9463,19 @@ class Game:
         if self.hardest["status"] == "ok" and not self.hardest_applied:
             self.hardest_applied = True
             if set_ranks(self.hardest.get("ranks", [])):
+                self.ranks_time = time.time()
+                self.online_seen = None     # (look up ranked online levels again)
                 self.check_top1()           # the Top 1 demon may have changed
-                if self.state == "select" and self.tab == RANKS_TAB:
-                    self.go_select(self.sel, RANKS_TAB)
+                if self.ranks_reload_asked:
+                    self.say("Ranks reloaded")
+            elif self.ranks_reload_asked:
+                self.say("The hardest-levels list on GitHub has no levels in it")
+            self.ranks_reload_asked = False
+            if self.state == "select" and self.tab == RANKS_TAB:
+                self.go_select(self.sel, RANKS_TAB)
+        if self.hardest["status"] == "error" and self.ranks_reload_asked:
+            self.ranks_reload_asked = False
+            self.say("Couldn't reload the ranks - check your internet connection")
         if (self.state == "select" and self.tab == RANKS_TAB
                 and self.online.get("status") in ("ok", "error")
                 and self.online_seen != self.online.get("status")
@@ -9653,6 +9715,8 @@ class Game:
             self.draw_tabs()
             if self.tab == ONLINE_TAB:
                 self.draw_online_sections()
+            elif self.tab == RANKS_TAB:
+                self.draw_ranks_bar()
         top, ch, gap = self.card_geom()
 
         for slot in range(VISIBLE_CARDS):
@@ -9764,6 +9828,11 @@ class Game:
                 self.draw_list("SELECT A LEVEL", "online levels from github.com/" + REPO,
                                "B / N / F: browse, newest, search   T: difficulty   "
                                "UP/DOWN: choose   ENTER: download / play   R: refresh")
+            elif self.tab == RANKS_TAB:
+                self.draw_list("SELECT A LEVEL", "the official hardest levels, hardest first - "
+                               "the #1 earns the Crown",
+                               "LEFT/RIGHT: tab   UP/DOWN: choose   ENTER: play / download   "
+                               "R: reload ranks   ESC: back")
             else:
                 self.draw_list("SELECT A LEVEL", "built-in levels, levels you built, and levels "
                                "you downloaded",
