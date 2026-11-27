@@ -71,10 +71,10 @@ Playing
   P  practice mode (respawn at last portal) / normal      H  hitboxes
   R  restart      TAB  settings      ESC  back
   1-9  warp to a checkpoint - 1 is the second one, R restarts  (only if "Level warping"
-       is enabled in Settings).  Checkpoints: the start, each mode portal, and the
-       CHECKPOINT flags placed in the editor
-  Practice mode respawns you at the last checkpoint you passed: at a CHECKPOINT flag
-  exactly as you were when you passed it, or else at the last mode portal
+       is enabled in Settings).  Checkpoints: the start and each mode portal
+  Practice mode respawns you at the last mode portal you passed.  A CHECKPOINT placed in
+  a portal's column (editor, PORTALS tab - invisible in play) sets where you appear
+  there instead of the portal's usual spot
   Every game mode has a floor AND a ceiling.  The ceiling is 1 block above the highest
   object in the level (never lower than 9 blocks); tall levels scroll up and down.
   Coins: grab them and FINISH the level in normal mode to keep them.
@@ -987,14 +987,18 @@ class Level:
         self.dual_x = sorted((o.col * B + B // 2, o.kind == "dual_on") for o in self.objs
                              if o.kind in DUAL_PORTALS)
         self.grav_x = sorted((o.col * B + B // 2, o.up) for o in self.objs if o.kind == "grav")
-        # checkpoints: the start (checkpoint 0), every mode portal's spawn spot and every
-        # placed checkpoint, in order.  Warping: key 1 = checkpoint 1 (the second one).
+        # checkpoints: the start (checkpoint 0) and every mode portal, in order - so
+        # checkpoint i is section i.  A checkpoint object placed in a portal's column sets
+        # where you appear there (practice respawns, warping) instead of the default.
+        # Warping: key 1 = checkpoint 1 (the second one).
+        flags = {}
+        for o in sorted(self.objs, key=lambda o: o.row):
+            if o.kind == "checkpoint":
+                flags.setdefault(o.col, o.row)
         cps = [{"x": 3.0 * B, "kind": "start", "sec": 0}]
-        cps += [{"x": float(c * B + B // 2), "kind": "portal", "sec": i}
+        cps += [{"x": float(c * B + B // 2), "kind": "portal", "sec": i, "row": flags.get(c)}
                 for i, (_, c) in enumerate(self.sections) if i > 0]
-        cps += [{"x": float(o.col * B + B // 2), "kind": "flag", "col": o.col, "row": o.row}
-                for o in self.objs if o.kind == "checkpoint"]
-        self.checkpoints = sorted(cps, key=lambda c: (c["x"], c["kind"] != "portal"))
+        self.checkpoints = cps
         sp = sorted((o.col, o.val) for o in self.objs if o.kind == "speed")
         self._speed_x = [c * B + B // 2 for c, _ in sp]
         self._speed_v = [v for _, v in sp]
@@ -4472,7 +4476,8 @@ TOOL_HELP = {
     "dual_on": "Symmetry portal - a second you on the other side, same game mode, "
                "inverse gravity",
     "dual_off": "Unsymmetry portal - back to just one of you",
-    "checkpoint": "Checkpoint - practice mode respawns you here; warping (1-9) goes here",
+    "checkpoint": "Checkpoint - put it in a mode portal: practice mode and warping put you "
+                  "here instead of the portal's usual spot (invisible in play)",
     "trig:particle": "Particle trigger - a burst (or a stream) of particles",
     "trig:pulse": "Pulse trigger - flashes the screen, or a group, a colour",
     "trig:rotate": "Rotate trigger - spins a group (around itself or another group)",
@@ -4809,6 +4814,11 @@ class Editor:
             if col < SAFE_COLS:
                 return
             kind, flip = TOOL_CELL[tool]
+            if kind == "checkpoint" and self.layer == "main" and col not in d.portals:
+                if first:
+                    self.say("Checkpoints go in a mode portal's column - they set where "
+                             "practice mode puts you there")
+                return
             if self.layer == "bg":
                 self.data.bg[(col, row)] = (kind, flip, self.group, self.bg_color)
             else:
@@ -6694,8 +6704,6 @@ class Game:
         self.cp_section = 0
         self.twin = None             # dual mode's second player (symmetry portals)
         self.killer = None           # ("twin" while the second player moves)
-        self.cp_snap = None          # practice: you, saved at the last checkpoint passed
-        self.next_cp = 0             # the next checkpoint (level.checkpoints) to pass
         self.dead_timer = 0
         self.finished = False
         self.input_lock = False
@@ -8502,6 +8510,19 @@ class Game:
         if self.playtest_x is not None and sec == self.playtest_sec:
             p.x = self.playtest_x
             p.speed_mult = self.level.speed_at(p.x)
+        else:
+            row = self.level.checkpoints[sec].get("row") if sec < len(
+                self.level.checkpoints) else None
+            if row is not None:                # a checkpoint placed in this portal
+                half = p.h / 2
+                top = FLOOR - (row + 1) * B
+                if p.mode in ("cube", "robot", "ball", "spider"):   # standing in its cell
+                    p.y = top + B - half
+                    p.on_ground = True
+                else:
+                    p.y = top + B / 2
+                    p.on_ground = False
+                p.y = max(self.level.ceil_y + half, min(FLOOR - half, p.y))
         p.wave_hold = self.settings["wave_hold"]
         if self.practice:          # practice keeps the coins you got before the checkpoint
             p.coins = frozenset(k for k in kept if k[0] * B < p.x)
@@ -8513,8 +8534,6 @@ class Game:
         self.twin = None
         if self.level.dual_at(p.x):            # inside a symmetry section: two of you
             self.set_dual(True)
-        self.cp_snap = None
-        self.next_cp = sum(1 for c in self.level.checkpoints if c["x"] <= p.x)
         self.level.reset_runtime(p.x)
         self.follow_camera(snap=True)
         self.start_level_music()
@@ -8539,62 +8558,10 @@ class Game:
         self.twin = t
         self.burst(p.x, t.y, (255, 150, 60), 14)
 
-    def snapshot(self):
-        return {"p": self.player.clone(), "twin": self.twin.clone() if self.twin else None,
-                "sec": self.cp_section}
-
-    def restore(self, snap):
-        """Practice: back to how you were when you passed the checkpoint."""
-        p = self.player
-        kept = p.coins
-        p.__dict__.update(snap["p"].clone().__dict__)
-        p.alive, p.buffer, p.dash = True, 0, 0
-        p.wave_hold = self.settings["wave_hold"]
-        p.coins = frozenset(k for k in kept if k[0] * B < p.x)
-        self.finished = False
-        self.cp_section = snap["sec"]
-        self.twin = snap["twin"].clone() if snap["twin"] else None
-        if self.twin:
-            self.twin.alive, self.twin.buffer = True, 0
-        self.next_cp = sum(1 for c in self.level.checkpoints if c["x"] <= p.x)
-        self.level.reset_runtime(p.x)
-        self.follow_camera(snap=True)
-        self.start_level_music()
-
-    def pass_checkpoints(self):
-        """Practice mode remembers you at each placed checkpoint you pass (a mode portal
-        after it puts you back at that portal's own spawn spot instead)."""
-        cps = self.level.checkpoints
-        while self.next_cp < len(cps) and cps[self.next_cp]["x"] <= self.player.x:
-            c = cps[self.next_cp]
-            self.next_cp += 1
-            if self.practice:
-                self.cp_snap = self.snapshot() if c["kind"] == "flag" else None
-
     def warp_to(self, i):
-        """Warp (1-9) to checkpoint i.  0 is the start, so 1 is the second checkpoint."""
-        lv = self.level
-        c = lv.checkpoints[i]
-        if c["kind"] != "flag":
-            self.spawn(c["sec"])
-        else:
-            x = c["x"]
-            self.spawn(max(0, bisect.bisect_right(lv.starts_px, x) - 1))
-            p = self.player
-            p.x = x
-            p.speed_mult = lv.speed_at(x)
-            p.g = lv.grav_at(x)
-            half = p.h / 2
-            top = FLOOR - (c["row"] + 1) * B
-            if p.mode in ("cube", "robot", "ball", "spider"):     # standing in its cell
-                p.y = top + B - half if p.g == 1 else top + half
-                p.on_ground = True
-            else:
-                p.y = top + B / 2
-            p.y = max(lv.ceil_y + half, min(FLOOR - half, p.y))
-            self.after_spawn()
-        if self.practice:                      # (practice carries on from here)
-            self.cp_snap = self.snapshot()
+        """Warp (1-9) to checkpoint i: 0 is the start (R), so 1 is the first mode portal
+        - at the checkpoint placed in it, if there is one."""
+        self.spawn(self.level.checkpoints[i]["sec"])
 
     # ---- music ----------------------------------------------------------------------
     def mixer_ready(self):
@@ -8684,10 +8651,9 @@ class Game:
     def respawn(self):
         self.attempt += 1
         self.assisted = False               # a fresh attempt starts clean
-        if self.practice and self.cp_snap:  # back to the last checkpoint you passed
-            self.restore(self.cp_snap)
-        else:
-            self.spawn(self.cp_section if self.practice else self.playtest_sec)
+        # practice: back to the last mode portal you passed (at its checkpoint, if one is
+        # placed in it)
+        self.spawn(self.cp_section if self.practice else self.playtest_sec)
 
     def progress_pct(self):
         total = self.level.end_col * B
@@ -9157,7 +9123,6 @@ class Game:
                 self.back_from_play()
             elif e.key == pygame.K_p:
                 self.practice = not self.practice
-                self.cp_snap = None
             elif e.key == pygame.K_h:
                 self.show_hitboxes = not self.show_hitboxes
                 self.save_settings()
@@ -9266,8 +9231,6 @@ class Game:
             t.x = p.x                         # (always side by side)
             if t.coins != p.coins:            # coins either of you grabs count
                 p.coins = t.coins = p.coins | t.coins
-        if p.alive:
-            self.pass_checkpoints()
         self.follow_camera()
         if p.alive and p.x >= self.level.end_col * B:
             self.finished = True
@@ -10424,10 +10387,11 @@ class Game:
             lr = lab.get_rect(midtop=(r.centerx, max(top, CEIL) + 6))
             pygame.draw.rect(s, (8, 8, 20), lr.inflate(8, 4), border_radius=4)
             s.blit(lab, lr)
-        elif k == "checkpoint":                       # a flag: practice / warp spot
-            passed = (self.state == "play" and self.practice
-                      and o.col * B + B / 2 <= self.player.x)
-            colr = (90, 230, 120) if passed else (255, 230, 90)
+        elif k == "checkpoint":                       # (only seen in the editor)
+            if self.state != "editor":
+                return
+            ok = self.editor is None or o.col in self.editor.data.portals
+            colr = (255, 230, 90) if ok else (255, 80, 80)    # (red: not in a portal)
             px = int(sx + 12)
             pygame.draw.line(s, (230, 230, 240), (px, sy + 4), (px, sy + B - 2), 3)
             pygame.draw.polygon(s, colr, [(px + 2, sy + 4), (px + 22, sy + 11),
