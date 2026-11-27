@@ -70,7 +70,11 @@ Playing
   SPACE / UP / W / left mouse   the one-button action (jump, thrust, flip...)
   P  practice mode (respawn at last portal) / normal      H  hitboxes
   R  restart      TAB  settings      ESC  back
-  1-9  warp to a section  (only if "Level warping" is enabled in Settings)
+  1-9  warp to a checkpoint - 1 is the second one, R restarts  (only if "Level warping"
+       is enabled in Settings).  Checkpoints: the start, each mode portal, and the
+       CHECKPOINT flags placed in the editor
+  Practice mode respawns you at the last checkpoint you passed: at a CHECKPOINT flag
+  exactly as you were when you passed it, or else at the last mode portal
   Every game mode has a floor AND a ceiling.  The ceiling is 1 block above the highest
   object in the level (never lower than 9 blocks); tall levels scroll up and down.
   Coins: grab them and FINISH the level in normal mode to keep them.
@@ -108,6 +112,8 @@ Extras (all trigger just by touching them - no button needed, in EVERY mode):
   click pads / click orbs   the same pads and orbs, but they only work if you click on them
   upside-down pads          the same pads, on the ceiling side - for flipped gravity
   gravity portals  flip gravity      speed portals  0.8x 1x 1.25x 1.5x 1.8x
+  symmetry portal  a second you on the other side (same mode, inverse gravity) - the
+                   unsymmetry portal ends it; if either of you crashes, you crash
   slopes           45-degree (1x1), gentle 1:2 (2 wide) and steep 2:1 (2 tall), facing any
                    way - run up / down them (deadly to the wave)
   spikes           pointing up, down, left or right
@@ -398,8 +404,14 @@ RAMPS = tuple(p + "_" + d for p in RAMP_SIZES for d in ("tl", "tr", "bl", "br"))
 FLOOR_RAMPS = {k for k in RAMPS if k.endswith(("_bl", "_br"))}   # solid BELOW the slope
 SIDE_SPIKES = ("spike_l", "spike_r")                    # spikes pointing left / right
 SOLID = {"block"} | set(RAMPS)
-CELL_KINDS = ({"block", "spike", "coin"} | set(PADS) | set(ORBS) | set(RAMPS)
-              | set(SIDE_SPIKES))
+# Symmetry / unsymmetry portals start / end dual mode: a second player on the other side,
+# in the same game mode with inverse gravity.  Checkpoints are where practice mode
+# respawns you and where warping (1-9) takes you.  These are placed like other objects
+# but never touch anything.
+DUAL_PORTALS = ("dual_on", "dual_off")
+MARKERS = {"grav", "speed", "checkpoint"} | set(DUAL_PORTALS)   # (no part in the ceiling)
+CELL_KINDS = ({"block", "spike", "coin", "checkpoint"} | set(PADS) | set(ORBS) | set(RAMPS)
+              | set(SIDE_SPIKES) | set(DUAL_PORTALS))
 BG_KINDS = {"block", "spike"} | set(RAMPS) | set(SIDE_SPIKES)  # background (decoration)
 SPIKES = {"spike"} | set(SIDE_SPIKES)
 LIGHT_EFFECTS = ("flicker_on", "flicker_off", "close_circle", "open_circle")
@@ -467,8 +479,10 @@ class Obj:
             self.rect = pygame.Rect(x + 6, y + 6, 28, 28)
         elif kind == "coin":
             self.rect = pygame.Rect(x + 6, y + 6, 28, 28)
-        elif kind in ("grav", "speed"):       # full-height portals
+        elif kind in ("grav", "speed") or kind in DUAL_PORTALS:      # full-height portals
             self.rect = pygame.Rect(x + 14, CEIL, 12, FLOOR - CEIL)
+        elif kind == "checkpoint":
+            self.rect = pygame.Rect(x + 10, y, 20, B)
         else:
             raise ValueError(kind)
         self.base = self.rect
@@ -905,7 +919,7 @@ class Level:
         anchor=True: the highest row an object is placed in (tall slopes not counted)."""
         top = -1
         for o in self.objs:
-            if o.kind in ("grav", "speed"):
+            if o.kind in MARKERS:
                 continue
             h = ramp_size(o.kind)[1] if (o.kind in RAMPS and not anchor) else 1
             top = max(top, o.row + h - 1)
@@ -920,7 +934,7 @@ class Level:
         self.ceil_rows = ceil_rows_for(self.top_row(), self.top_row(anchor=True))
         self.ceil_y = FLOOR - self.ceil_rows * B
         for o in self.objs:                      # portals reach all the way up
-            if o.kind in ("grav", "speed"):
+            if o.kind in ("grav", "speed") or o.kind in DUAL_PORTALS:
                 o.base = o.rect = pygame.Rect(o.col * B + 14, self.ceil_y, 12,
                                               FLOOR - self.ceil_y)
 
@@ -969,6 +983,18 @@ class Level:
         self.coins = sorted((o for o in self.objs if o.kind == "coin"),
                             key=lambda o: (o.col, o.row))
         self.starts_px = [c * B + B // 2 for _, c in self.sections]
+        # symmetry portals (x, on) and gravity portals (x, up), in order
+        self.dual_x = sorted((o.col * B + B // 2, o.kind == "dual_on") for o in self.objs
+                             if o.kind in DUAL_PORTALS)
+        self.grav_x = sorted((o.col * B + B // 2, o.up) for o in self.objs if o.kind == "grav")
+        # checkpoints: the start (checkpoint 0), every mode portal's spawn spot and every
+        # placed checkpoint, in order.  Warping: key 1 = checkpoint 1 (the second one).
+        cps = [{"x": 3.0 * B, "kind": "start", "sec": 0}]
+        cps += [{"x": float(c * B + B // 2), "kind": "portal", "sec": i}
+                for i, (_, c) in enumerate(self.sections) if i > 0]
+        cps += [{"x": float(o.col * B + B // 2), "kind": "flag", "col": o.col, "row": o.row}
+                for o in self.objs if o.kind == "checkpoint"]
+        self.checkpoints = sorted(cps, key=lambda c: (c["x"], c["kind"] != "portal"))
         sp = sorted((o.col, o.val) for o in self.objs if o.kind == "speed")
         self._speed_x = [c * B + B // 2 for c, _ in sp]
         self._speed_v = [v for _, v in sp]
@@ -1222,6 +1248,24 @@ class Level:
                     out[cfg["group"]] = (rgb, a)
         return out
 
+    def dual_at(self, x):
+        """Is dual mode on at world x (after the last symmetry / unsymmetry portal)?"""
+        on = False
+        for px, v in self.dual_x:
+            if px > x:
+                break
+            on = v
+        return on
+
+    def grav_at(self, x):
+        """Gravity at world x: gravity portals since the start of that section."""
+        start = self.starts_px[max(0, bisect.bisect_right(self.starts_px, x) - 1)]
+        g = 1
+        for px, up in self.grav_x:
+            if start <= px <= x:
+                g = -1 if up else 1
+        return g
+
     def speed_at(self, x):
         """Speed multiplier in effect at world x (set by the last speed portal passed)."""
         i = bisect.bisect_right(self._speed_x, x) - 1
@@ -1357,6 +1401,8 @@ class LevelData:
     def top_row(self, anchor=False):
         top = -1
         for (c, r), v in self.cells.items():
+            if v[0] in MARKERS:
+                continue
             top = max(top, r + (ramp_size(v[0])[1] - 1 if v[0] in RAMPS and not anchor else 0))
         for (c, r) in self.texts:
             top = max(top, r)
@@ -1528,6 +1574,9 @@ class _AutoRun:
         self.dead = True
 
     def burst(self, *a, **k):
+        pass
+
+    def set_dual(self, on):
         pass
 
 
@@ -2837,6 +2886,7 @@ class Player:
         self.ceil = CEIL             # y of this level's ceiling (set on respawn)
         self.dash = 0                # frames into a dash-orb dash (0 = not dashing)
         self.touching = frozenset()  # pads touched last frame (some only fire on arrival)
+        self.twin = False            # True for dual mode's second player
         self.clicked = False         # the button was pressed this frame (click pads)
 
     @property
@@ -2897,7 +2947,7 @@ class Player:
         mode = game.level.sections[idx][0]
         game.cp_section = idx
         self.set_mode(mode)
-        self.g = 1
+        self.g = -1 if self.twin else 1          # (the second player: inverse gravity)
         self.vy = 0.0
         self.rot = 0.0
 
@@ -3217,7 +3267,10 @@ class Player:
                     game.burst(o.rect.centerx, o.rect.centery, (255, 215, 60), 18)
             elif k == "grav":
                 if r.colliderect(o.rect):
-                    self.g = -1 if o.up else 1
+                    self.g = (-1 if o.up else 1) * (-1 if self.twin else 1)
+            elif k in DUAL_PORTALS:
+                if r.colliderect(o.rect) and not self.twin:
+                    game.set_dual(k == "dual_on")
             elif k == "speed":
                 if r.colliderect(o.rect):
                     self.speed_mult = o.val
@@ -4387,7 +4440,8 @@ TAB_DEFS = {
                         [("ic" + k, "IC-" + l) for k, l in _ORB_LABELS]]),
         ("PORTALS", [[("portal:" + m, m.upper()) for m in MODE_ORDER],
                      [("portal:miniwave", "MINI WAVE"), ("finish", "FINISH"),
-                      ("grav_d", "GRAV v"), ("grav_u", "GRAV ^")]]),
+                      ("grav_d", "GRAV v"), ("grav_u", "GRAV ^"), ("dual_on", "SYMMETRY"),
+                      ("dual_off", "UNSYM"), ("checkpoint", "CHECKPT")]]),
         ("SPEED", [[("speed:%g" % v, "%gx" % v) for v in SPEED_VALUES], []]),
         ("TRIGGERS", [[("trig:move", "MOVE"), ("trig:reveal", "REVEAL"),
                        ("light:flicker_on", "FLICK ON"), ("light:flicker_off", "FLICK OFF"),
@@ -4415,6 +4469,10 @@ TOOL_HELP = {
     "light:flicker_off": "Light trigger - lights flicker off",
     "light:close_circle": "Light trigger - darkness closes in to a circle around you",
     "light:open_circle": "Light trigger - the circle of light opens back up",
+    "dual_on": "Symmetry portal - a second you on the other side, same game mode, "
+               "inverse gravity",
+    "dual_off": "Unsymmetry portal - back to just one of you",
+    "checkpoint": "Checkpoint - practice mode respawns you here; warping (1-9) goes here",
     "trig:particle": "Particle trigger - a burst (or a stream) of particles",
     "trig:pulse": "Pulse trigger - flashes the screen, or a group, a colour",
     "trig:rotate": "Rotate trigger - spins a group (around itself or another group)",
@@ -4461,6 +4519,8 @@ TOOL_CELL = {
     "block": ("block", False), "spike": ("spike", False), "spike_d": ("spike", True),
     "spike_l": ("spike_l", False), "spike_r": ("spike_r", False),
     "coin": ("coin", False),
+    "dual_on": ("dual_on", False), "dual_off": ("dual_off", False),
+    "checkpoint": ("checkpoint", False),
 }
 for _k in PADS + ORBS:                  # every pad and orb, and an invisible version
     TOOL_CELL[_k] = (_k, False)
@@ -6040,6 +6100,14 @@ class Editor:
         elif tool.startswith("portal:"):
             m = tool.split(":")[1]
             pygame.draw.ellipse(s, ACCENT[m], (cx - 7, cy - 11, 14, 22), 3)
+        elif tool in DUAL_PORTALS:
+            colr = (255, 150, 60) if tool == "dual_on" else (90, 170, 255)
+            pygame.draw.ellipse(s, colr, (cx - 7, cy - 11, 14, 22), 3)
+            pygame.draw.line(s, (255, 255, 255), (cx - 4, cy), (cx + 4, cy), 2)
+        elif tool == "checkpoint":
+            pygame.draw.line(s, (230, 230, 240), (cx - 6, cy - 10), (cx - 6, cy + 11), 2)
+            pygame.draw.polygon(s, (255, 230, 90), [(cx - 5, cy - 10), (cx + 9, cy - 5),
+                                                    (cx - 5, cy)])
 
     def draw_group_tag(self, g, sx, sy):
         if g:
@@ -6496,7 +6564,8 @@ SETTING_INFO = [
     ("wave_hold", "Wave controls", "CLICK: each click switches direction   HOLD: hold to go up"),
     ("music", "Music", "Play the songs attached to levels"),
     ("noclip", "Noclip", "Pass through everything and never die"),
-    ("warp", "Level warping", "Number keys 1-9 jump to a section of the level"),
+    ("warp", "Level warping", "Number keys 1-9 jump to checkpoints (1 = the second one; "
+                              "R restarts)"),
     ("hitboxes", "Show hitboxes", "Draw player and hazard hitboxes (H toggles it in a level)"),
     ("fps", "Show FPS", "Display the current frame rate in the bottom-right corner"),
     ("fullscreen", "Fullscreen", "F11, Alt+Enter or Ctrl/Cmd+F from anywhere"),
@@ -6623,6 +6692,10 @@ class Game:
         self.playtest_x = None
         self.attempt = 1
         self.cp_section = 0
+        self.twin = None             # dual mode's second player (symmetry portals)
+        self.killer = None           # ("twin" while the second player moves)
+        self.cp_snap = None          # practice: you, saved at the last checkpoint passed
+        self.next_cp = 0             # the next checkpoint (level.checkpoints) to pass
         self.dead_timer = 0
         self.finished = False
         self.input_lock = False
@@ -8432,9 +8505,96 @@ class Game:
         p.wave_hold = self.settings["wave_hold"]
         if self.practice:          # practice keeps the coins you got before the checkpoint
             p.coins = frozenset(k for k in kept if k[0] * B < p.x)
+        self.after_spawn()
+
+    def after_spawn(self):
+        """Everything that follows putting the player somewhere new."""
+        p = self.player
+        self.twin = None
+        if self.level.dual_at(p.x):            # inside a symmetry section: two of you
+            self.set_dual(True)
+        self.cp_snap = None
+        self.next_cp = sum(1 for c in self.level.checkpoints if c["x"] <= p.x)
         self.level.reset_runtime(p.x)
         self.follow_camera(snap=True)
         self.start_level_music()
+
+    # ---- dual mode (symmetry portals) and checkpoints ----------------------------
+    def set_dual(self, on):
+        """Symmetry portal: a second you on the other side, in the same game mode with
+        inverse gravity; both move on the same clicks.  Unsymmetry portal: back to one."""
+        p = self.player
+        if not on:
+            self.twin = None
+            return
+        if self.twin:
+            return
+        t = p.clone()
+        t.twin = True
+        t.g = -p.g
+        t.y = self.level.ceil_y + FLOOR - p.y          # (mirrored top to bottom)
+        t.vy = -p.vy
+        t.dash = 0
+        t.on_ground = False
+        self.twin = t
+        self.burst(p.x, t.y, (255, 150, 60), 14)
+
+    def snapshot(self):
+        return {"p": self.player.clone(), "twin": self.twin.clone() if self.twin else None,
+                "sec": self.cp_section}
+
+    def restore(self, snap):
+        """Practice: back to how you were when you passed the checkpoint."""
+        p = self.player
+        kept = p.coins
+        p.__dict__.update(snap["p"].clone().__dict__)
+        p.alive, p.buffer, p.dash = True, 0, 0
+        p.wave_hold = self.settings["wave_hold"]
+        p.coins = frozenset(k for k in kept if k[0] * B < p.x)
+        self.finished = False
+        self.cp_section = snap["sec"]
+        self.twin = snap["twin"].clone() if snap["twin"] else None
+        if self.twin:
+            self.twin.alive, self.twin.buffer = True, 0
+        self.next_cp = sum(1 for c in self.level.checkpoints if c["x"] <= p.x)
+        self.level.reset_runtime(p.x)
+        self.follow_camera(snap=True)
+        self.start_level_music()
+
+    def pass_checkpoints(self):
+        """Practice mode remembers you at each placed checkpoint you pass (a mode portal
+        after it puts you back at that portal's own spawn spot instead)."""
+        cps = self.level.checkpoints
+        while self.next_cp < len(cps) and cps[self.next_cp]["x"] <= self.player.x:
+            c = cps[self.next_cp]
+            self.next_cp += 1
+            if self.practice:
+                self.cp_snap = self.snapshot() if c["kind"] == "flag" else None
+
+    def warp_to(self, i):
+        """Warp (1-9) to checkpoint i.  0 is the start, so 1 is the second checkpoint."""
+        lv = self.level
+        c = lv.checkpoints[i]
+        if c["kind"] != "flag":
+            self.spawn(c["sec"])
+        else:
+            x = c["x"]
+            self.spawn(max(0, bisect.bisect_right(lv.starts_px, x) - 1))
+            p = self.player
+            p.x = x
+            p.speed_mult = lv.speed_at(x)
+            p.g = lv.grav_at(x)
+            half = p.h / 2
+            top = FLOOR - (c["row"] + 1) * B
+            if p.mode in ("cube", "robot", "ball", "spider"):     # standing in its cell
+                p.y = top + B - half if p.g == 1 else top + half
+                p.on_ground = True
+            else:
+                p.y = top + B / 2
+            p.y = max(lv.ceil_y + half, min(FLOOR - half, p.y))
+            self.after_spawn()
+        if self.practice:                      # (practice carries on from here)
+            self.cp_snap = self.snapshot()
 
     # ---- music ----------------------------------------------------------------------
     def mixer_ready(self):
@@ -8524,7 +8684,10 @@ class Game:
     def respawn(self):
         self.attempt += 1
         self.assisted = False               # a fresh attempt starts clean
-        self.spawn(self.cp_section if self.practice else self.playtest_sec)
+        if self.practice and self.cp_snap:  # back to the last checkpoint you passed
+            self.restore(self.cp_snap)
+        else:
+            self.spawn(self.cp_section if self.practice else self.playtest_sec)
 
     def progress_pct(self):
         total = self.level.end_col * B
@@ -8568,10 +8731,11 @@ class Game:
         self.stop_music()
         self.record_best(self.progress_pct())
         col = ACCENT[p.mode]
+        who = self.twin if (self.killer == "twin" and self.twin) else p   # (who crashed)
         for _ in range(36):
             ang = random.uniform(0, math.tau)
             spd = random.uniform(2, 9)
-            self.particles.append([p.x, p.y, math.cos(ang) * spd,
+            self.particles.append([who.x, who.y, math.cos(ang) * spd,
                                    math.sin(ang) * spd - 2,
                                    random.randint(25, 45), col])
 
@@ -8975,6 +9139,8 @@ class Game:
                 self.pause()
                 return
             self.player.buffer = BUFFER_FRAMES
+            if self.twin:
+                self.twin.buffer = BUFFER_FRAMES
             self.play_click()
         if e.type == pygame.KEYDOWN:
             if e.key == pygame.K_ESCAPE:
@@ -8984,11 +9150,14 @@ class Game:
                     self.pause()
             elif e.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w):
                 self.player.buffer = BUFFER_FRAMES
+                if self.twin:
+                    self.twin.buffer = BUFFER_FRAMES
                 self.play_click()
             elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and self.finished:
                 self.back_from_play()
             elif e.key == pygame.K_p:
                 self.practice = not self.practice
+                self.cp_snap = None
             elif e.key == pygame.K_h:
                 self.show_hitboxes = not self.show_hitboxes
                 self.save_settings()
@@ -9001,12 +9170,16 @@ class Game:
                 self.assisted = False
                 self.spawn(self.playtest_sec)
             elif pygame.K_1 <= e.key <= pygame.K_9:
-                idx = e.key - pygame.K_1
+                idx = e.key - pygame.K_1 + 1    # 1 = the second checkpoint (R restarts)
                 if not self.settings["warp"]:
                     self.say("Level warping is off - enable it in Settings (TAB)")
-                elif idx < len(self.level.sections):
-                    self.spawn(idx)
+                elif idx < len(self.level.checkpoints):
+                    self.warp_to(idx)
                     self.assisted = True        # warped: this attempt won't count
+                else:
+                    self.say("This level has %d checkpoint%s to warp to" % (
+                        len(self.level.checkpoints) - 1,
+                        "" if len(self.level.checkpoints) == 2 else "s"))
 
     # ---- update -------------------------------------------------------------------
     def update(self):
@@ -9081,7 +9254,20 @@ class Game:
             self.level.spawned = []
             if len(self.particles) > 1500:
                 del self.particles[:len(self.particles) - 1500]
-        p.step(self.is_held(), self)
+        held = self.is_held()
+        p.step(held, self)
+        t = self.twin
+        if t and p.alive:                     # dual mode: the second you, same clicks
+            self.killer = "twin"
+            try:
+                t.step(held, self)
+            finally:
+                self.killer = None
+            t.x = p.x                         # (always side by side)
+            if t.coins != p.coins:            # coins either of you grabs count
+                p.coins = t.coins = p.coins | t.coins
+        if p.alive:
+            self.pass_checkpoints()
         self.follow_camera()
         if p.alive and p.x >= self.level.end_col * B:
             self.finished = True
@@ -9477,7 +9663,8 @@ class Game:
         # level objects
         for c in range(c0, c1):
             for o in lv.cols.get(c, ()):
-                if not o.hidden and (r_lo <= o.row <= r_hi or o.kind in ("grav", "speed")):
+                if not o.hidden and (r_lo <= o.row <= r_hi or o.kind in ("grav", "speed")
+                                     or o.kind in DUAL_PORTALS):
                     self.draw_obj(o, cam, acc)
         for o in lv.dyn:
             if not o.hidden and -B < o.rect.x - cam < W + B:
@@ -9499,26 +9686,26 @@ class Game:
                     colr = (255, 255, 255) if ((i - ceil_s) // 20 + j) % 2 == 0 else (30, 30, 30)
                     pygame.draw.rect(s, colr, (fx + j * 20, i, 20, 20))
 
-        # wave trail
-        if len(p.trail) >= 2:
-            pts = [(tx - cam, ty + camy) for tx, ty in p.trail]
-            pygame.draw.lines(s, (20, 20, 40), False, pts, 8)
-            pygame.draw.lines(s, self.skin_for("wave")["b"], False, pts, 4)
-
-        # player
-        if p.alive:
-            spr = make_sprite(p, self.skin_for(p.mode))
-            if p.mini:                                  # the mini wave is drawn smaller
-                spr = pygame.transform.rotozoom(spr, 0, 0.7)
-            if p.mode in FLIPPABLE and p.g == -1:
-                spr = pygame.transform.flip(spr, False, True)
-            ang = p.angle()
-            if abs(ang) > 0.01:
-                spr = pygame.transform.rotozoom(spr, ang, 1.0)
-            s.blit(spr, spr.get_rect(center=(int(p.x - cam), int(p.y + camy))))
-            if self.show_hitboxes:
-                r = p.rect().move(-int(cam), int(camy))
-                pygame.draw.rect(s, (0, 255, 0), r, 1)
+        for pl in [p] + ([self.twin] if self.twin else []):     # (dual mode: both)
+            # wave trail
+            if len(pl.trail) >= 2:
+                pts = [(tx - cam, ty + camy) for tx, ty in pl.trail]
+                pygame.draw.lines(s, (20, 20, 40), False, pts, 8)
+                pygame.draw.lines(s, self.skin_for("wave")["b"], False, pts, 4)
+            # player
+            if p.alive:
+                spr = make_sprite(pl, self.skin_for(pl.mode))
+                if pl.mini:                             # the mini wave is drawn smaller
+                    spr = pygame.transform.rotozoom(spr, 0, 0.7)
+                if pl.mode in FLIPPABLE and pl.g == -1:
+                    spr = pygame.transform.flip(spr, False, True)
+                ang = pl.angle()
+                if abs(ang) > 0.01:
+                    spr = pygame.transform.rotozoom(spr, ang, 1.0)
+                s.blit(spr, spr.get_rect(center=(int(pl.x - cam), int(pl.y + camy))))
+                if self.show_hitboxes:
+                    r = pl.rect().move(-int(cam), int(camy))
+                    pygame.draw.rect(s, (0, 255, 0), r, 1)
 
         # particles
         for pt in self.particles:
@@ -10220,6 +10407,31 @@ class Game:
                 for a in range(8):
                     a0 = spin + a * math.pi / 4
                     pygame.draw.arc(s, col, (cx - 23, cy - 23, 46, 46), a0, a0 + 0.45, 2)
+        elif k in DUAL_PORTALS:                       # symmetry / unsymmetry portal
+            top = int(self.view_ceil + self.camy)
+            r = pygame.Rect(0, 0, 30, FLOOR - self.view_ceil)
+            r.midtop = (int(sx + B / 2), top)
+            on = k == "dual_on"
+            colr = (255, 150, 60) if on else (90, 170, 255)
+            pygame.draw.ellipse(s, colr, r, 5)
+            pygame.draw.ellipse(s, (255, 255, 255), r.inflate(-14, -30), 2)
+            cy = r.centery
+            for d in ((-1, 1) if on else (1, -1)):     # two arrows: apart / together
+                pygame.draw.polygon(s, colr, [(r.centerx - 7, cy + d * 10),
+                                              (r.centerx + 7, cy + d * 10),
+                                              (r.centerx, cy + d * (10 + 9 * (1 if on else -1)))])
+            lab = self.tiny.render("SYM" if on else "UNSYM", True, colr)
+            lr = lab.get_rect(midtop=(r.centerx, max(top, CEIL) + 6))
+            pygame.draw.rect(s, (8, 8, 20), lr.inflate(8, 4), border_radius=4)
+            s.blit(lab, lr)
+        elif k == "checkpoint":                       # a flag: practice / warp spot
+            passed = (self.state == "play" and self.practice
+                      and o.col * B + B / 2 <= self.player.x)
+            colr = (90, 230, 120) if passed else (255, 230, 90)
+            px = int(sx + 12)
+            pygame.draw.line(s, (230, 230, 240), (px, sy + 4), (px, sy + B - 2), 3)
+            pygame.draw.polygon(s, colr, [(px + 2, sy + 4), (px + 22, sy + 11),
+                                          (px + 2, sy + 18)])
         elif k in ("speed", "grav"):
             top = int(self.view_ceil + self.camy)
             r = pygame.Rect(0, 0, 26, FLOOR - self.view_ceil)
