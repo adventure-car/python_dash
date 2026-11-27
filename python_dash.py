@@ -124,6 +124,8 @@ Extras (all trigger just by touching them - no button needed, in EVERY mode):
 
 Level editor
 ------------
+  EDIT BG > THEME sets the level's background; select an area first to give just that
+  part (any columns and rows) its own background, like WATER SURFACE.
   The palette has tabs:  OBJECTS  SLOPES  PADS  ORBS  CLICK PADS  UPSIDE PADS  CLICK ORBS
                          PORTALS  SPEED  TRIGGERS
   (every pad and orb has an invisible "I-" version)
@@ -434,7 +436,9 @@ COLOR_SLOTS = len(DEFAULT_PALETTE) + 1           # "auto" + 10 colours
 BG_COLORS = [None] + DEFAULT_PALETTE             # (kept for older code paths)
 COLORABLE = {"block", "spike"} | set(RAMPS) | set(SIDE_SPIKES)  # kinds that take a colour
 THEMES = [("", "NORMAL"), ("underwater", "UNDERWATER"), ("ocean", "OCEAN"), ("city", "CITY"),
-          ("crystal", "CRYSTAL"), ("backyard", "BACKYARD")]
+          ("crystal", "CRYSTAL"), ("backyard", "BACKYARD"), ("surface", "WATER SURFACE")]
+# Background areas: part of a level (columns c0-c1, rows r0-r1) can have its own theme.
+ZONES_MAX = 200
 GROUP_MAX = 999
 
 
@@ -853,6 +857,7 @@ class Level:
         self.end_col = 0
         self.music = None        # full path of the level's song, if any
         self.theme = ""          # background theme ("" or "underwater")
+        self.theme_zones = []    # background areas: (c0, r0, c1, r1, theme)
         self.palette = list(DEFAULT_PALETTE)   # the level's 10 editable colours
         defn.builder(self)
         self.finalize()
@@ -1366,6 +1371,7 @@ class LevelData:
         self.cells = {}      # (col,row) -> (kind, flip, group, color)  main layer
         self.bg = {}         # (col,row) -> (kind, flip, group, color)  background layer
         self.theme = ""      # background theme: "" or "underwater"
+        self.zones = []      # background areas: [c0, r0, c1, r1, theme] (their own theme)
         self.palette = list(DEFAULT_PALETTE)   # colour slots 1-10 (editable)
         self.texts = {}      # (col,row) -> (text, group)
         self.triggers = {}   # (col,row) -> settings dict (see clean_trigger)
@@ -1383,12 +1389,12 @@ class LevelData:
         return copy.deepcopy((self.cells, self.bg, self.texts, self.triggers, self.gravs,
                               self.portals, self.speeds, self.finish, self.start_mode,
                               self.name, self.description, self.music, self.theme,
-                              self.palette))
+                              self.palette, self.zones))
 
     def restore(self, snap):
         (self.cells, self.bg, self.texts, self.triggers, self.gravs, self.portals,
          self.speeds, self.finish, self.start_mode, self.name, self.description,
-         self.music, self.theme, self.palette) = copy.deepcopy(snap)
+         self.music, self.theme, self.palette, self.zones) = copy.deepcopy(snap)
 
     def last_col(self):
         cols = ([c for c, _ in self.cells] + [c for c, _ in self.bg]
@@ -1425,6 +1431,7 @@ class LevelData:
         for (c, r), (kind, flip, grp, colr) in self.bg.items():
             lv.bg_objs.append(Obj(kind, c, r, flip=flip, group=grp, color=colr))
         lv.theme = self.theme
+        lv.theme_zones = [tuple(z) for z in self.zones]
         for (c, r), (text, grp) in self.texts.items():
             lv.text(c, r, text, grp)
         for (c, r), cfg in self.triggers.items():
@@ -1452,6 +1459,8 @@ class LevelData:
                                for (c, r), (k, f, g, col) in sorted(self.bg.items())]
         if self.theme:
             j["theme"] = self.theme
+        if self.zones:
+            j["theme_zones"] = [list(z) for z in self.zones]
         if self.difficulty:
             j["difficulty"] = self.difficulty
         if [tuple(p) for p in self.palette] != DEFAULT_PALETTE:
@@ -1507,6 +1516,14 @@ class LevelData:
                 d.palette = list(DEFAULT_PALETTE)
         cells_from(j.get("background"), BG_KINDS, d.bg, colored=True)
         d.theme = j.get("theme") if j.get("theme") in dict(THEMES) else ""
+        for z in (j.get("theme_zones") or [])[:ZONES_MAX]:
+            try:
+                c0, r0, c1, r1 = (int(v) for v in z[:4])
+                th = z[4]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if th in dict(THEMES) and 0 <= c0 <= c1 < MAX_COLS and 0 <= r0 <= r1 < EDIT_ROWS:
+                d.zones.append([c0, r0, c1, r1, th])
         for item in j.get("texts") or []:
             try:
                 c, r, t, g = int(item[0]), int(item[1]), str(item[2]), int(item[3])
@@ -1558,6 +1575,7 @@ def level_to_data(level, name):
     for o in level.bg_objs:
         d.bg[(o.col, o.row)] = (o.kind, o.flip, o.group, o.color)
     d.theme = level.theme
+    d.zones = [list(z) for z in getattr(level, "theme_zones", [])]
     d.palette = list(level.palette)
     for t in level.texts:
         d.texts[(t.col, t.row)] = (t.text, t.group)
@@ -4549,7 +4567,10 @@ TOOL_HELP = {
     "objcolor": "Colour for blocks, spikes and ramps (with a selection: recolours it)."
                 "  Right-click to edit",
     "editcolor": "Change the selected colour - everything using it updates",
-    "theme": "Background theme for the whole level (try UNDERWATER)",
+    "theme": "Background theme for the whole level - or select an area first to give just "
+             "that part its own (right-click: back)",
+    "area": "This area's own background (click again for the next; after the last it's "
+            "removed). DELETE removes areas inside the selection too",
     "erase": "Eraser (right mouse button erases with any tool)",
     "delete": "Delete the selection - or press DELETE / BACKSPACE over any object",
     "copy": "Copy the selection (Ctrl/Cmd+C)", "cut": "Cut the selection (Ctrl/Cmd+X)",
@@ -5097,8 +5118,49 @@ class Editor:
         self.dirty = True
         self.say("Pasted %d objects" % n)
 
+    def zone_at_sel(self):
+        """The background area exactly covering the selection, or None."""
+        c0, r0, c1, r1 = self.sel_rect()
+        return next((z for z in self.data.zones if z[:4] == [c0, r0, c1, r1]), None)
+
+    def cycle_zone(self, step):
+        """THEME with a selection (background layer): give that area its own background -
+        step through the themes; past the last one the area is removed."""
+        c0, r0, c1, r1 = self.sel_rect()
+        r0, r1 = max(0, r0), min(EDIT_ROWS - 1, r1)
+        z = self.zone_at_sel()
+        keys = [k for k, _ in THEMES] + [None]          # None = no area here
+        cur = z[4] if z else None
+        new = keys[(keys.index(cur) + step) % len(keys)]
+        self.push_undo()
+        if z:
+            self.data.zones.remove(z)
+        if new is not None:
+            if len(self.data.zones) >= ZONES_MAX:
+                self.say("A level can have at most %d background areas" % ZONES_MAX)
+                return
+            self.data.zones.append([c0, r0, c1, r1, new])
+            self.say("Background area (%d x %d blocks): %s" % (c1 - c0 + 1, r1 - r0 + 1,
+                                                               dict(THEMES)[new]))
+        else:
+            self.say("Background area removed")
+        self.dirty = True
+
     def delete_sel(self):
         items = self.selected()
+        if self.layer == "bg" and self.sel:            # background areas inside it go too
+            c0, r0, c1, r1 = self.sel_rect()
+            inside = [z for z in self.data.zones
+                      if c0 <= z[0] and z[2] <= c1 and r0 <= z[1] and z[3] <= r1]
+            if inside:
+                self.push_undo()
+                for z in inside:
+                    self.data.zones.remove(z)
+                self.remove_items(items)
+                self.dirty = True
+                self.say("Deleted %d objects and %d background area%s" % (
+                    len(items), len(inside), "" if len(inside) == 1 else "s"))
+                return
         if items:
             self.push_undo()
             self.remove_items(items)
@@ -5988,9 +6050,13 @@ class Editor:
                 return
         if self.layer == "bg":
             if THEME_BUTTON.collidepoint(pos):
+                if self.sel:                       # a background area: the selection
+                    self.cycle_zone(-1 if button == 3 else 1)
+                    return
                 keys = [k for k, _ in THEMES]
                 self.push_undo()
-                self.data.theme = keys[(keys.index(self.data.theme) + 1) % len(keys)]
+                step = -1 if button == 3 else 1
+                self.data.theme = keys[(keys.index(self.data.theme) + step) % len(keys)]
                 self.dirty = True
                 self.say("Background theme: " + dict(THEMES)[self.data.theme])
                 return
@@ -6309,6 +6375,17 @@ class Editor:
         acc = ACCENT[secs[0][0]]
         lo, hi = first - 1, first + W // B + 2
         # the layer you're not editing is drawn faded
+        for c0, r0, c1, r1, th in self.data.zones:      # background areas
+            area = pygame.Rect(int(c0 * B - cam), int(self.row_y(r1)), (c1 - c0 + 1) * B,
+                               (r1 - r0 + 1) * B)
+            if area.colliderect(pygame.Rect(0, CEIL, W, FLOOR - CEIL)):
+                veil = pygame.Surface(area.size, pygame.SRCALPHA)
+                veil.fill((90, 200, 255, 22 if self.layer == "bg" else 10))
+                s.blit(veil, area.topleft)
+                draw_dashed_rect(s, area, (90, 200, 255) if self.layer == "bg"
+                                 else (60, 110, 150), 8, 5, 2)
+                lab = g.micro.render("BG: " + dict(THEMES)[th], True, (150, 220, 255))
+                s.blit(lab, (area.x + 4, max(CEIL + 2, area.y + 3)))
         self.draw_layer("bg", cam, acc, lo, hi)
         if self.layer == "bg":
             layer = pygame.Surface((W, H), pygame.SRCALPHA)
@@ -6439,10 +6516,16 @@ class Editor:
             if er.collidepoint((mx, my)):
                 hover_tool = "editcolor"
         if self.layer == "bg":
-            self.draw_button(THEME_BUTTON, "THEME: " + dict(THEMES)[self.data.theme],
-                             active=bool(self.data.theme), color=(90, 200, 255), font=g.micro)
+            if self.sel:                               # the selection's background area
+                z = self.zone_at_sel()
+                self.draw_button(THEME_BUTTON, "AREA: " + (dict(THEMES)[z[4]] if z else "-"),
+                                 active=bool(z), color=(255, 200, 90), font=g.micro)
+            else:
+                self.draw_button(THEME_BUTTON, "THEME: " + dict(THEMES)[self.data.theme],
+                                 active=bool(self.data.theme), color=(90, 200, 255),
+                                 font=g.micro)
             if THEME_BUTTON.collidepoint((mx, my)):
-                hover_tool = "theme"
+                hover_tool = "area" if self.sel else "theme"
         for name, r in SIDE_BUTTONS.items():
             act = (name == self.tool) or (name == "paste" and self.pasting)
             colr = {"select": (255, 230, 90), "erase": (255, 90, 90),
@@ -6742,6 +6825,7 @@ class Game:
         self.city = None             # cached night sky + skyline layers
         self.cave = None             # cached crystal cavern layers
         self.yard = None             # cached backyard layers
+        self.surface_bits = None     # cached water-surface gradients
         self.palette = list(DEFAULT_PALETTE)   # colour slots of the level being drawn
         self.camy = 0.0              # vertical camera: added to world y to get screen y
         self.view_ceil = CEIL        # world y of the ceiling being drawn
@@ -9893,30 +9977,16 @@ class Game:
         acc = self.col(self.accent)
         s.fill(bg)
 
-        if self.level.theme == "underwater":
-            self.draw_underwater(cam)
-        elif self.level.theme == "ocean":
-            self.draw_ocean(cam)
-        elif self.level.theme == "city":
-            self.draw_city(cam)
-        elif self.level.theme == "crystal":
-            self.draw_crystal(cam)
-        elif self.level.theme == "backyard":
-            self.draw_backyard(cam)
-        # parallax grid
-        grid = tuple(min(255, v + 14) for v in bg)
-        off = (cam * 0.4) % 80
-        for i in range(-1, W // 80 + 2):
-            if self.level.theme:
-                break                          # themes draw their own scenery
-            x = int(i * 80 - off)
-            pygame.draw.line(s, grid, (x, 0), (x, FLOOR), 1)
-        yoff = (camy * 0.4) % 80
-        for i in range(-1, H // 80 + 2):
-            if self.level.theme:
-                break
-            y = int(i * 80 + yoff)
-            pygame.draw.line(s, grid, (0, y), (W, y), 1)
+        # the background: the level's theme, then any background areas with their own
+        self.draw_theme(lv.theme, cam, camy, bg, (lv.ceil_y + FLOOR) / 2 + camy)
+        for c0, r0, c1, r1, th in lv.theme_zones:
+            area = pygame.Rect(int(c0 * B - cam), int(FLOOR - (r1 + 1) * B + camy),
+                               (c1 - c0 + 1) * B, (r1 - r0 + 1) * B)
+            if area.colliderect(s.get_rect()):
+                s.set_clip(area)
+                s.fill(bg)
+                self.draw_theme(th, cam, camy, bg, area.centery)
+                s.set_clip(None)
 
         # ceiling (every mode has one: one block above the highest object)
         secs = self.level.sections
@@ -10502,6 +10572,87 @@ class Game:
             x = (i * 107 - cam * 0.5) % W + math.sin((t + i * 40) * 0.05) * 5
             y = FLOOR - ((t * (0.7 + (i % 3) * 0.3) + i * 71) % (FLOOR + 40))
             pygame.draw.circle(s, (210, 245, 255), (int(x), int(y)), 2 + i % 3, 1)
+
+    def draw_theme(self, theme, cam, camy, bg, water_y):
+        """One background theme over the screen (clip it to draw it in an area only).
+        water_y: where the water's surface goes for the WATER SURFACE theme."""
+        if theme == "underwater":
+            self.draw_underwater(cam)
+        elif theme == "ocean":
+            self.draw_ocean(cam)
+        elif theme == "city":
+            self.draw_city(cam)
+        elif theme == "crystal":
+            self.draw_crystal(cam)
+        elif theme == "backyard":
+            self.draw_backyard(cam)
+        elif theme == "surface":
+            self.draw_surface(cam, water_y)
+        else:                                    # NORMAL: a parallax grid
+            s = self.screen
+            grid = tuple(min(255, v + 14) for v in bg)
+            off = (cam * 0.4) % 80
+            for i in range(-1, W // 80 + 2):
+                x = int(i * 80 - off)
+                pygame.draw.line(s, grid, (x, 0), (x, FLOOR), 1)
+            yoff = (camy * 0.4) % 80
+            for i in range(-1, H // 80 + 2):
+                y = int(i * 80 + yoff)
+                pygame.draw.line(s, grid, (0, y), (W, y), 1)
+
+    # ---- water surface theme ---------------------------------------------------------------
+    def draw_surface(self, cam, wy):
+        """The water's surface: sky above, waves rolling along the waterline, water below."""
+        s = self.screen
+        t = self.menu_t
+        wy = int(wy)
+        if self.surface_bits is None:              # gradients, made once
+            sky = pygame.Surface((W, H))
+            for y in range(H):
+                u = y / H
+                pygame.draw.line(sky, (int(120 + 90 * u), int(185 + 50 * u), int(240 + 10 * u)),
+                                 (0, y), (W, y))
+            deep = pygame.Surface((W, H), pygame.SRCALPHA)
+            for y in range(H):                     # darker the deeper it goes
+                pygame.draw.line(deep, (5, 25, 60, min(200, int(y * 0.55))), (0, y), (W, y))
+            self.surface_bits = (sky, deep)
+        sky, deep = self.surface_bits
+        s.blit(sky, (0, min(0, wy - H // 2)))
+        # sun and clouds (far away: they barely move)
+        sun = (W - 150 - int(cam * 0.02) % 40, max(40, wy - 190))
+        pygame.draw.circle(s, (255, 245, 200), sun, 34)
+        pygame.draw.circle(s, (255, 250, 225), sun, 26)
+        for i in range(5):
+            x = (i * 230 - cam * 0.08 - t * 0.15) % (W + 300) - 150
+            y = wy - 120 - (i * 47) % 110
+            for dx, dy, r in ((0, 0, 22), (24, -8, 26), (52, 0, 20), (26, 6, 22)):
+                pygame.draw.circle(s, (250, 252, 255), (int(x + dx), int(y + dy)), r)
+
+        def wave(wx, k):
+            return (wy + k * (6 * math.sin(wx * 0.018 + t * 0.045)
+                              + 3 * math.sin(wx * 0.047 - t * 0.07)))
+        # a lighter wave behind, then the water in front
+        back = [(0, H)] + [(x, wave(x + cam * 0.5 + 300, 1.3) - 8)
+                           for x in range(0, W + 17, 16)] + [(W, H)]
+        pygame.draw.polygon(s, (70, 160, 215), back)
+        front = [(x, wave(x + cam * 0.8, 1.0)) for x in range(0, W + 17, 16)]
+        pygame.draw.polygon(s, (35, 120, 190), [(0, H)] + front + [(W, H)])
+        s.blit(deep, (0, wy))
+        rays = pygame.Surface((W, H), pygame.SRCALPHA)   # sunlight under the water
+        for i in range(5):
+            x = (i * 210 - cam * 0.15) % (W + 240) - 120 + math.sin(t * 0.01 + i) * 20
+            pygame.draw.polygon(rays, (200, 240, 255, 22),
+                                [(x, wy), (x + 40, wy), (x + 160, wy + 300), (x + 90, wy + 300)])
+        s.blit(rays, (0, 0))
+        pygame.draw.lines(s, (225, 245, 255), False, front, 3)     # foam on the waves
+        for i in range(0, len(front) - 1, 3):
+            fx, fy = front[i]
+            if math.sin(fx * 0.05 + t * 0.03 + cam * 0.04) > 0.6:
+                pygame.draw.circle(s, (240, 250, 255), (int(fx), int(fy) - 1), 3)
+        for i in range(14):                        # bubbles rising under the surface
+            x = (i * 97 - cam * 0.6) % W + math.sin((t + i * 30) * 0.05) * 4
+            y = wy + 220 - ((t * (0.6 + (i % 3) * 0.3) + i * 53) % 210)
+            pygame.draw.circle(s, (210, 240, 255), (int(x), int(y)), 2 + i % 2, 1)
 
     # ---- underwater theme ------------------------------------------------------------------
     def draw_underwater(self, cam):
