@@ -5,7 +5,7 @@
   "third": "ingame:Neon Gauntlet",
   "fourth": "ingame:Chopper City",
   "fifth": "ingame:Inferno Circuit",
-  "sixth": "",
+  "sixth": "online:gravitational_force",
   "seventh": "",
   "eighth": "",
   "ninth": "",
@@ -25,6 +25,7 @@
     "ingame:Velocity Battle": {"maker": "AugmentedMagic, AXO, Claude", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "0"},
     "ingame:Neon Gauntlet": {"maker": "Claude", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "1 (60 Hz)"},
     "ingame:Chopper City": {"maker": "Claude", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "0"},
-    "ingame:Inferno Circuit": {"maker": "Claude", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "0"}
+    "ingame:Inferno Circuit": {"maker": "Claude", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "0"},
+    "online:gravitational_force": {"maker": "AugmentedMagic", "verifier": "AXO", "victors": ["AXO", "AugmentedMagic"], "frame_perfects": "0"}
   }
 }
