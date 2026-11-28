@@ -194,75 +194,16 @@ from collections import defaultdict, deque
 
 import pygame
 
-# --------------------------------------------------------------------------
-# Desktop or web.  The same file runs in a browser (built with pygbag, see web/):
-# there, downloads go through the browser and "background" work runs between frames.
-# --------------------------------------------------------------------------
-WEB = sys.platform == "emscripten"
-_bg_jobs = []                    # (web) work waiting to run after the next frame
-
-
 def run_bg(target, *args):
-    """Do some slow work (downloads...) without freezing the game.  On a computer it
-    runs on a thread; in a browser it runs right after the next frame is drawn (so a
-    "Loading..." message shows first)."""
-    if WEB:
-        _bg_jobs.append((target, args))
-        return
+    """Do some slow work (downloads...) on a background thread, so the game never
+    freezes while it waits."""
     threading.Thread(target=target, args=args, daemon=True).start()
-
-
-def run_bg_jobs():
-    """(web) Run the work waiting from run_bg - one job per frame."""
-    if _bg_jobs:
-        target, args = _bg_jobs.pop(0)
-        try:
-            target(*args)
-        except Exception as ex:
-            print("background job failed:", ex)
-
-
-_JS_READY = [False]
-_JS_REQUEST = """
-window.pd_request = function (method, url, body, headers) {
-    var x = new XMLHttpRequest();
-    try {
-        x.open(method, url, false);
-        x.overrideMimeType("text/plain; charset=x-user-defined");
-        var h = JSON.parse(headers);
-        for (var k in h) { x.setRequestHeader(k, h[k]); }
-        x.send(body === "" ? null : body);
-    } catch (e) { return "0|"; }
-    var t = x.responseText || "", out = [];
-    for (var i = 0; i < t.length; i += 8192) {
-        var part = [];
-        for (var j = i; j < Math.min(t.length, i + 8192); j++) {
-            part.push(String.fromCharCode(t.charCodeAt(j) & 255));
-        }
-        out.push(part.join(""));
-    }
-    return x.status + "|" + btoa(out.join(""));
-};
-"""
 
 
 def net_request(method, url, data=None, headers=None, timeout=15):
     """One web request: (status, body bytes).  An error status comes back as a status,
     not an exception; no connection at all raises OSError."""
     headers = dict(headers or {})
-    if WEB:
-        import platform as jsp                  # (pygbag: the browser's window)
-        if not _JS_READY[0]:
-            jsp.window.eval(_JS_REQUEST)
-            _JS_READY[0] = True
-        headers.pop("User-Agent", None)         # (browsers won't let a page set it)
-        reply = str(jsp.window.pd_request(method, url,
-                                          data.decode("utf-8") if data else "",
-                                          json.dumps(headers)))
-        status, _, body = reply.partition("|")
-        if status in ("", "0"):
-            raise OSError("no connection")
-        return int(status), base64.b64decode(body)
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -4340,7 +4281,7 @@ class ProgressSync:
 
     def start(self, token):
         self.token = token
-        if not self.thread and not WEB:     # (web: each save sends straight away)
+        if not self.thread:
             self.thread = threading.Thread(target=self.run, daemon=True)
             self.thread.start()
 
@@ -4353,10 +4294,7 @@ class ProgressSync:
             return
         with self.lock:
             self.pending = copy.deepcopy(progress_only(data))
-        if WEB:
-            run_bg(self.send_once)
-        else:
-            self.wake.set()
+        self.wake.set()
 
     def run(self):
         while True:
@@ -6821,8 +6759,6 @@ PAUSE_BUTTON = pygame.Rect(12, 44, 30, 28)      # pause button while playing
 def make_display(fullscreen):
     """Window drawn at a fixed 960x540 and scaled (letterboxed) to the window or
     screen; pygame.SCALED also translates mouse positions for us."""
-    if WEB:                                # (the web page scales the canvas itself)
-        return pygame.display.set_mode((W, H))
     flags = pygame.SCALED | pygame.RESIZABLE
     if fullscreen:
         flags |= pygame.FULLSCREEN
@@ -11282,18 +11218,6 @@ class Game:
         while True:
             self.frame()
             self.clock.tick(FPS)
-
-    async def run_async(self, every_frame=None):
-        """The main loop for the browser (pygbag): the same frames, handing control back
-        to the browser after each one."""
-        import asyncio
-        while True:
-            self.frame()
-            run_bg_jobs()                  # (the "background" work, after the frame)
-            if every_frame:
-                every_frame()
-            self.clock.tick(FPS)
-            await asyncio.sleep(0)
 
 
 if __name__ == "__main__":
