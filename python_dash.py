@@ -195,6 +195,85 @@ from collections import defaultdict, deque
 import pygame
 
 # --------------------------------------------------------------------------
+# Desktop or web.  The same file runs in a browser (built with pygbag, see web/):
+# there, downloads go through the browser and "background" work runs between frames.
+# --------------------------------------------------------------------------
+WEB = sys.platform == "emscripten"
+_bg_jobs = []                    # (web) work waiting to run after the next frame
+
+
+def run_bg(target, *args):
+    """Do some slow work (downloads...) without freezing the game.  On a computer it
+    runs on a thread; in a browser it runs right after the next frame is drawn (so a
+    "Loading..." message shows first)."""
+    if WEB:
+        _bg_jobs.append((target, args))
+        return
+    threading.Thread(target=target, args=args, daemon=True).start()
+
+
+def run_bg_jobs():
+    """(web) Run the work waiting from run_bg - one job per frame."""
+    if _bg_jobs:
+        target, args = _bg_jobs.pop(0)
+        try:
+            target(*args)
+        except Exception as ex:
+            print("background job failed:", ex)
+
+
+_JS_READY = [False]
+_JS_REQUEST = """
+window.pd_request = function (method, url, body, headers) {
+    var x = new XMLHttpRequest();
+    try {
+        x.open(method, url, false);
+        x.overrideMimeType("text/plain; charset=x-user-defined");
+        var h = JSON.parse(headers);
+        for (var k in h) { x.setRequestHeader(k, h[k]); }
+        x.send(body === "" ? null : body);
+    } catch (e) { return "0|"; }
+    var t = x.responseText || "", out = [];
+    for (var i = 0; i < t.length; i += 8192) {
+        var part = [];
+        for (var j = i; j < Math.min(t.length, i + 8192); j++) {
+            part.push(String.fromCharCode(t.charCodeAt(j) & 255));
+        }
+        out.push(part.join(""));
+    }
+    return x.status + "|" + btoa(out.join(""));
+};
+"""
+
+
+def net_request(method, url, data=None, headers=None, timeout=15):
+    """One web request: (status, body bytes).  An error status comes back as a status,
+    not an exception; no connection at all raises OSError."""
+    headers = dict(headers or {})
+    if WEB:
+        import platform as jsp                  # (pygbag: the browser's window)
+        if not _JS_READY[0]:
+            jsp.window.eval(_JS_REQUEST)
+            _JS_READY[0] = True
+        headers.pop("User-Agent", None)         # (browsers won't let a page set it)
+        reply = str(jsp.window.pd_request(method, url,
+                                          data.decode("utf-8") if data else "",
+                                          json.dumps(headers)))
+        status, _, body = reply.partition("|")
+        if status in ("", "0"):
+            raise OSError("no connection")
+        return int(status), base64.b64decode(body)
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as ex:
+        try:
+            return ex.code, ex.read()
+        except Exception:
+            return ex.code, b""
+
+# --------------------------------------------------------------------------
 # Constants
 # --------------------------------------------------------------------------
 W, H = 960, 540
@@ -4213,23 +4292,25 @@ def server_call(method, path, body=None, token=None, timeout=12):
     order = ([u for u in SERVER_URLS if _server_down.get(u, 0) <= now]
              + [u for u in SERVER_URLS if _server_down.get(u, 0) > now])  # down ones last
     for url in order:
-        req = urllib.request.Request(url + path, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                reply = json.loads(r.read().decode("utf-8") or "{}")
-        except urllib.error.HTTPError as ex:
-            if ex.code == 503:                      # switched OFF on its review page:
-                _server_down[url] = now + SERVER_RETRY_SECONDS      # try the next one
-                continue
-            _server_down.pop(url, None)             # it's on - and it answered "no"
-            try:
-                msg = json.loads(ex.read().decode("utf-8")).get("error")
-            except Exception:
-                msg = None
-            raise ServerError(msg or "The server said no (%d)" % ex.code, ex.code, url)
+            status, raw = net_request(method, url + path, data, headers, timeout)
         except Exception:
             _server_down[url] = now + SERVER_RETRY_SECONDS    # off: try the next one
             continue
+        if status == 503:                           # switched OFF on its review page:
+            _server_down[url] = now + SERVER_RETRY_SECONDS    # try the next one
+            continue
+        if status >= 400:
+            _server_down.pop(url, None)             # it's on - and it answered "no"
+            try:
+                msg = json.loads(raw.decode("utf-8")).get("error")
+            except Exception:
+                msg = None
+            raise ServerError(msg or "The server said no (%d)" % status, status, url)
+        try:
+            reply = json.loads(raw.decode("utf-8") or "{}")
+        except ValueError:
+            raise ServerError("The server sent something odd back", 0, url)
         _server_down.pop(url, None)
         if not isinstance(reply, dict):
             raise ServerError("The server sent something odd back", 0, url)
@@ -4259,7 +4340,7 @@ class ProgressSync:
 
     def start(self, token):
         self.token = token
-        if not self.thread:
+        if not self.thread and not WEB:     # (web: each save sends straight away)
             self.thread = threading.Thread(target=self.run, daemon=True)
             self.thread.start()
 
@@ -4272,16 +4353,24 @@ class ProgressSync:
             return
         with self.lock:
             self.pending = copy.deepcopy(progress_only(data))
-        self.wake.set()
+        if WEB:
+            run_bg(self.send_once)
+        else:
+            self.wake.set()
 
     def run(self):
         while True:
             self.wake.wait(30)
             self.wake.clear()
+            self.send_once()
+
+    def send_once(self):
+        """Send the newest progress (if any) to the server, once."""
+        if True:
             with self.lock:
                 data, token = self.pending, self.token
             if data is None or not token:
-                continue
+                return
             try:
                 reply = server_call("PUT", "/api/progress", {"progress": data}, token)
                 with self.lock:
@@ -4301,9 +4390,11 @@ _sync = ProgressSync()
 # background thread so the game never freezes while it downloads.
 # --------------------------------------------------------------------------
 def http_get(url, timeout=15):
-    req = urllib.request.Request(url, headers={"User-Agent": "PythonDash"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+    status, body = net_request("GET", url, headers={"User-Agent": "PythonDash"},
+                               timeout=timeout)
+    if status != 200:
+        raise OSError("HTTP %d" % status)
+    return body
 
 
 def raw_url(path, name):
@@ -5573,7 +5664,7 @@ class Editor:
             except Exception:
                 self.song_dl_done = "!" + name
             self.song_dl = None
-        threading.Thread(target=work, daemon=True).start()
+        run_bg(work)
         self.say("Downloading " + song_title(name) + "...")
 
     def show_local_song(self, name):
@@ -6730,6 +6821,8 @@ PAUSE_BUTTON = pygame.Rect(12, 44, 30, 28)      # pause button while playing
 def make_display(fullscreen):
     """Window drawn at a fixed 960x540 and scaled (letterboxed) to the window or
     screen; pygame.SCALED also translates mouse positions for us."""
+    if WEB:                                # (the web page scales the canvas itself)
+        return pygame.display.set_mode((W, H))
     flags = pygame.SCALED | pygame.RESIZABLE
     if fullscreen:
         flags |= pygame.FULLSCREEN
@@ -6825,8 +6918,7 @@ class Game:
         self.start_hardest_fetch()                 # refresh the ranks in the background
         self.repo_main = {"status": "loading"}     # main levels from the repo's main_levels/
         self.repo_main_applied = False
-        threading.Thread(target=fetch_repo_main_levels, args=(self.repo_main,),
-                         daemon=True).start()
+        run_bg(fetch_repo_main_levels, self.repo_main)
         self.move_old_downloads()
         self.other = []
         self.empty_lines = []
@@ -6960,8 +7052,7 @@ class Game:
             _sync.start(user["token"])
             self.server_pull = {"status": "loading",       # get the server's copy
                                 "url": user.get("url") or SERVER_URLS[0]}
-            threading.Thread(target=self.pull_progress,
-                             args=(self.server_pull, user["token"]), daemon=True).start()
+            run_bg(self.pull_progress, self.server_pull, user["token"])
         if user:
             self.grant_verified(user)
 
@@ -7357,8 +7448,7 @@ class Game:
         store_current(None)
         if user:
             store_server_session(None)
-            threading.Thread(target=lambda: self._quiet_logout(user["token"]),
-                             daemon=True).start()
+            run_bg(lambda: self._quiet_logout(user["token"]))
         if name:
             self.say("Signed out of %s - playing as Guest" % name)
 
@@ -7854,15 +7944,14 @@ class Game:
         if self.online["status"] == "loading" or (self.online["status"] == "ok" and not force):
             return
         self.online = {"status": "loading"}
-        threading.Thread(target=fetch_online_levels, args=(self.online,), daemon=True).start()
+        run_bg(fetch_online_levels, self.online)
 
     def fetch_online_songs(self, force=False):
         o = self.online_songs
         if o["status"] == "loading" or (o["status"] == "ok" and not force):
             return
         self.online_songs = {"status": "loading"}
-        threading.Thread(target=fetch_online_music, args=(self.online_songs,),
-                         daemon=True).start()
+        run_bg(fetch_online_music, self.online_songs)
 
     def start_hardest_fetch(self, force=False):
         if self.hardest["status"] == "loading" or (self.hardest["status"] == "ok"
@@ -7870,8 +7959,7 @@ class Game:
             return
         self.hardest = {"status": "loading"}
         self.hardest_applied = False
-        threading.Thread(target=fetch_hardest, args=(self.hardest, force),
-                         daemon=True).start()
+        run_bg(fetch_hardest, self.hardest, force)
 
     def reload_ranks(self):
         """Ranks tab: R / RELOAD RANKS - get the hardest-levels list (and the online
@@ -8015,7 +8103,7 @@ class Game:
             return False
         song = os.path.basename(lv["music"]) if lv["music"] else ""
         if song and not music_path(song):
-            threading.Thread(target=self.fetch_level_song, args=(song,), daemon=True).start()
+            run_bg(self.fetch_level_song, song)
         self.say("Updated %s to v%s" % (lv["name"], version_str(lv.get("version"))))
         return True
 
@@ -8138,8 +8226,7 @@ class Game:
             msg = "Downloaded %s" % lv["name"]
             song = os.path.basename(lv["music"]) if lv["music"] else ""
             if song and not music_path(song):
-                threading.Thread(target=self.fetch_level_song, args=(song,),
-                                 daemon=True).start()
+                run_bg(self.fetch_level_song, song)
                 msg += " - getting its song too"
             self.say(msg + "  (ENTER to play)")
             self.go_select(i, ONLINE_TAB)
@@ -8181,7 +8268,7 @@ class Game:
             return
         song = os.path.basename(lv["music"]) if lv["music"] else ""
         if song and not music_path(song):
-            threading.Thread(target=self.fetch_level_song, args=(song,), daemon=True).start()
+            run_bg(self.fetch_level_song, song)
         self.say("Downloaded %s" % lv["name"])
         self.go_select(i, RANKS_TAB)
         self.list_activate(i)
@@ -8449,7 +8536,7 @@ class Game:
                     except OSError:
                         pass
                 self.say("Upload failed: %s" % ex)
-        threading.Thread(target=send, daemon=True).start()
+        run_bg(send)
 
     # ---- MY ONLINE LEVELS: change a level of yours that's online -------------------
     def go_myonline(self):
@@ -8466,7 +8553,7 @@ class Game:
             except (ServerError, KeyError, TypeError) as ex:
                 out["err"] = str(ex)
                 out["status"] = "error"
-        threading.Thread(target=fetch, daemon=True).start()
+        run_bg(fetch)
         self.show_myonline()
 
     def show_myonline(self, sel=0):
@@ -8595,7 +8682,7 @@ class Game:
                                   if r.get("version") != info.get("version") else ""))
             except ServerError as ex:
                 f["result"] = (False, str(ex))
-        threading.Thread(target=send, daemon=True).start()
+        run_bg(send)
 
     def olform_event(self, e):
         f = self.olform
@@ -9005,7 +9092,7 @@ class Game:
             except Exception:
                 return                              # (not in the repo either)
             self.song_arrived = (lv, path)
-        threading.Thread(target=get, daemon=True).start()
+        run_bg(get)
 
     def start_level_music(self):
         if self.level and not self.level.music and getattr(self.level, "music_name", ""):
@@ -9537,7 +9624,8 @@ class Game:
 
     # ---- pause menu ---------------------------------------------------------------------
     def pause_labels(self):
-        return ["RESUME", "RETURN TO EDITOR" if self.playtest else "RETURN TO LEVEL SELECT"]
+        return ["RESUME", "RETRY", "RETURN TO EDITOR" if self.playtest else
+                "RETURN TO LEVEL SELECT"]
 
     def pause_rect(self, i):
         r = pygame.Rect(0, 0, 400, 56)
@@ -9560,9 +9648,27 @@ class Game:
     def pause_activate(self, i):
         if i == 0:
             self.resume()
+        elif i == 1:                          # RETRY: start again (like R)
+            self.paused = False
+            self.input_lock = True
+            self.restart()
         else:
             self.paused = False
             self.back_from_play()
+
+    def restart(self):
+        """Start the level again from the beginning (R, RETRY, REPLAY)."""
+        self.attempt += 1
+        self.assisted = False
+        self.spawn(self.playtest_sec)
+
+    def finish_buttons(self):
+        """The level-complete screen's buttons (so it works by touch too)."""
+        a = pygame.Rect(0, 0, 220, 48)
+        b = pygame.Rect(0, 0, 260, 48)
+        a.topright = (W // 2 - 10, 64)
+        b.topleft = (W // 2 + 10, 64)
+        return {"replay": a, "back": b}
 
     def pause_event(self, e):
         n = len(self.pause_labels())
@@ -9639,6 +9745,13 @@ class Game:
             if PAUSE_BUTTON.collidepoint(e.pos) and not self.finished:
                 self.pause()
                 return
+            if self.finished:                         # level complete: its two buttons
+                btn = self.finish_buttons()
+                if btn["replay"].collidepoint(e.pos):
+                    self.restart()
+                elif btn["back"].collidepoint(e.pos):
+                    self.back_from_play()
+                return
             self.player.buffer = BUFFER_FRAMES
             if self.twin:
                 self.twin.buffer = BUFFER_FRAMES
@@ -9666,9 +9779,7 @@ class Game:
             elif e.key == pygame.K_n:
                 self.say("Noclip is in Settings (TAB)")
             elif e.key == pygame.K_r:
-                self.attempt += 1
-                self.assisted = False
-                self.spawn(self.playtest_sec)
+                self.restart()
             elif pygame.K_1 <= e.key <= pygame.K_9:
                 idx = e.key - pygame.K_1 + 1    # 1 = the second checkpoint (R restarts)
                 if not self.settings["warp"]:
@@ -11149,15 +11260,40 @@ class Game:
                 t4 = self.font.render("Noclip / warping was used - this run doesn't count",
                                       True, (255, 120, 120))
                 s.blit(t4, (W // 2 - t4.get_width() // 2, H // 2 + 52))
+            mx, my = pygame.mouse.get_pos()
+            for key, label, colr in (("replay", "REPLAY (R)", (90, 230, 120)),
+                                     ("back", ("EDITOR" if self.playtest else "LEVEL SELECT")
+                                      + " (ENTER)", (200, 205, 230))):
+                r = self.finish_buttons()[key]
+                hov = r.collidepoint((mx, my))
+                pygame.draw.rect(s, (34, 40, 80) if hov else (16, 19, 42), r, border_radius=10)
+                pygame.draw.rect(s, colr, r, 3 if hov else 2, border_radius=10)
+                bt = self.font.render(label, True, colr)
+                s.blit(bt, (r.centerx - bt.get_width() // 2, r.centery - bt.get_height() // 2))
 
     # ---- main loop -----------------------------------------------------------------------
+    def frame(self):
+        for e in pygame.event.get():
+            self.handle_event(e)
+        self.update()
+        self.draw()
+
     def run(self):
         while True:
-            for e in pygame.event.get():
-                self.handle_event(e)
-            self.update()
-            self.draw()
+            self.frame()
             self.clock.tick(FPS)
+
+    async def run_async(self, every_frame=None):
+        """The main loop for the browser (pygbag): the same frames, handing control back
+        to the browser after each one."""
+        import asyncio
+        while True:
+            self.frame()
+            run_bg_jobs()                  # (the "background" work, after the frame)
+            if every_frame:
+                every_frame()
+            self.clock.tick(FPS)
+            await asyncio.sleep(0)
 
 
 if __name__ == "__main__":
