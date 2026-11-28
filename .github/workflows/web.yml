@@ -1,0 +1,53 @@
+# Builds the web version of Python Dash (for phones and any browser) and puts it on
+# GitHub Pages: https://adventure-car.github.io/python_dash/
+# Runs whenever the game or the web launcher changes on main (or by hand: Actions tab ->
+# "Web version" -> Run workflow).
+# One-time setup: Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+name: Web version
+
+on:
+  push:
+    branches: [main]
+    paths: ["python_dash.py", "web/**", ".github/workflows/web.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build with pygbag
+        run: |
+          pip install pygbag==0.9.3
+          mkdir -p build_web
+          cp web/main.py python_dash.py build_web/
+          python -m pygbag --build build_web
+          ls -la build_web/build/web
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build_web/build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
