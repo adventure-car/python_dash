@@ -93,8 +93,10 @@ def check_level(path, pd, vl, existing_names):
     if data.coin_count():
         lines.append("- %d coin%s" % (data.coin_count(), "" if data.coin_count() == 1 else "s"))
     if j.get("music"):
-        lines.append("- Song: %s%s" % (j["music"], " (included in the file)"
-                                       if j.get("music_data") else ""))
+        lines.append("- Song: %s" % j["music"])
+    if j.get("music_data"):
+        lines.append("- ⚠️ The song is inside the level file - level files should only name "
+                     "their song, with the song itself added to `music/`")
     if vl is not None:
         signal.signal(signal.SIGALRM, _alarm)
         signal.alarm(SOLVE_SECONDS)

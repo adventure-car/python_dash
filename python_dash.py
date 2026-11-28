@@ -165,7 +165,8 @@ Level editor
   The first 6 columns are a safe start zone.  Mode portals split the level into
   sections; the "START" button picks the first section's mode.
 Levels are saved as JSON in ~/.python_dash/levels/ and show up in PLAY.  EXPORT puts a
-copy on your Desktop that carries your account name and the level's song.
+copy on your Desktop that carries your account name; a song that isn't in the repo's
+music folder is saved next to it (drag the .json in and the song comes with it).
 
 Adding built-in levels
 ----------------------
@@ -1461,7 +1462,7 @@ class LevelData:
         lv.music = music_path(self.music)
         lv.music_name = self.music               # (to download it, if it's missing)
 
-    def to_json(self, embed_music=False):
+    def to_json(self):
         j = {
             "name": self.name, "author": self.author, "description": self.description,
             "start_mode": self.start_mode, "finish": self.finish,
@@ -1488,12 +1489,8 @@ class LevelData:
             j["texts"] = [[c, r, t, g] for (c, r), (t, g) in sorted(self.texts.items())]
         if self.triggers:
             j["triggers"] = [[c, r, cfg] for (c, r), cfg in sorted(self.triggers.items())]
-        if self.music:
-            j["music"] = self.music
-            path = music_path(self.music)
-            if embed_music and path:          # exported files carry the song with them
-                with open(path, "rb") as f:
-                    j["music_data"] = base64.b64encode(f.read()).decode("ascii")
+        if self.music:                        # (just its name: songs never go inside
+            j["music"] = self.music           # level files - see Game.share)
         return j
 
     @classmethod
@@ -1574,7 +1571,7 @@ class LevelData:
             if abs(near - float(v)) < 0.01 and 0 <= int(c) < MAX_COLS:
                 d.speeds[int(c)] = near
         music = str(j.get("music", "") or "")
-        if j.get("music_data"):               # a shared level that carries its song
+        if j.get("music_data"):               # (older level files carried their song inside)
             try:
                 raw = base64.b64decode(j["music_data"])
                 ext = os.path.splitext(music)[1] or ".mp3"
@@ -8307,14 +8304,17 @@ class Game:
         try:
             data = it["data"]
             data.author = self.account or ""             # your account name goes with it
-            j = self.share_json(data)                   # ...and its song (by name if
-            #                                             it's in the repo, else inside)
-            with open(dest, "w") as f:
-                json.dump(j, f)
+            j, song = self.share(data)                  # its song: by name; a song that
+            with open(dest, "w") as f:                  # isn't in the repo is saved
+                json.dump(j, f)                         # next to the level file
+            if song:
+                self.put_song_beside(song, dest_dir)
         except OSError:
             self.say("Couldn't export the level")
             return
         msg = "Exported to " + os.path.join(os.path.basename(dest_dir), os.path.basename(dest))
+        if song:
+            msg += " (and its song, %s)" % os.path.basename(song)
         if not self.account:
             msg += "  (sign in to put your name on it)"
         self.say(msg)
@@ -8346,15 +8346,36 @@ class Game:
                 return None
         return None
 
-    def share_json(self, data, wait=False):
-        """A level ready to share (upload / export): if its song is in the repo's music
-        folder it just names that song; otherwise the song goes inside the file."""
-        song = self.repo_song(data.music, wait) if data.music else None
+    def share(self, data, wait=False):
+        """A level ready to share (upload / export): (level, song file or None).  The
+        level only ever names its song.  If the song is in the repo's music folder it
+        names that song and nothing else is needed; otherwise the song file has to go
+        along with the level, as its own file (returned here)."""
+        j = data.to_json()
+        if not data.music:
+            return j, None
+        song = self.repo_song(data.music, wait)
         if song:
-            j = data.to_json()
             j["music"] = song
-            return j
-        return data.to_json(embed_music=True)
+            return j, None
+        path = music_path(data.music)
+        j["music"] = os.path.basename(data.music) if path else ""
+        return j, path
+
+    @staticmethod
+    def song_payload(path):
+        """A song file to send to the server alongside a level."""
+        with open(path, "rb") as f:
+            return {"name": os.path.basename(path),
+                    "data": base64.b64encode(f.read()).decode("ascii")}
+
+    @staticmethod
+    def put_song_beside(song_path, folder):
+        """Copy a song next to a level file (exported / shared-folder uploads)."""
+        dest = os.path.join(folder, os.path.basename(song_path))
+        if not os.path.isfile(dest):
+            with open(song_path, "rb") as src, open(dest, "wb") as out:
+                out.write(src.read())
 
     def upload_selected(self):
         """Send a level from Your Levels to the shared folder as an upload request.
@@ -8382,10 +8403,12 @@ class Game:
             os.makedirs(SUBMIT_DIR, exist_ok=True)
             data = it["data"]
             data.author = self.account                   # your account name goes with it
-            j = self.share_json(data)                    # ...and its song
+            j, song = self.share(data)                   # ...and its song, beside it
             dest = unique_level_path(it["name"], SUBMIT_DIR)
             with open(dest, "w") as f:
                 json.dump(j, f)
+            if song:
+                self.put_song_beside(song, SUBMIT_DIR)
         except OSError:
             self.say("Couldn't upload the level")
             return
@@ -8404,12 +8427,15 @@ class Game:
 
         def send():
             try:
-                j = self.share_json(data, wait=True)   # its song: by name if in the repo
+                j, song = self.share(data, wait=True)  # its song: by name if in the repo,
+                body = {"level": j}                    # else sent as its own file
+                if song:
+                    body["song"] = self.song_payload(song)
             except OSError:
                 self.say("Couldn't read the level")
                 return
             try:
-                server_call("POST", "/api/levels/submit", {"level": j}, token, timeout=120)
+                server_call("POST", "/api/levels/submit", body, token, timeout=120)
                 self.say("Uploaded \"%s\" - AXO or AugmentedMagic will review it" % data.name)
             except ServerError as ex:
                 if ex.status == 0 and SUBMIT_DIR:     # every server is off: shared folder
@@ -8552,7 +8578,9 @@ class Game:
             data = self.custom[f["lvl"] - 1]
             data.author = self.account or ""
             try:
-                body["level"] = self.share_json(data)   # (its song: by name, or inside)
+                body["level"], song = self.share(data)  # (its song: by name, or its own file)
+                if song:
+                    body["song"] = self.song_payload(song)
             except OSError:
                 f["err"] = "Couldn't read that level"
                 return
@@ -8696,6 +8724,14 @@ class Game:
             if not isinstance(j, dict) or not ({"cells", "portals", "start_mode"} & set(j)):
                 raise ValueError("not a Python Dash level")
             data = LevelData.from_json(j)
+            if data.music and not music_path(data.music):   # its song, next to the file?
+                beside = os.path.join(os.path.dirname(path), os.path.basename(data.music))
+                if os.path.isfile(beside) and data.music.lower().endswith(MUSIC_EXTS):
+                    os.makedirs(MUSIC_DIR, exist_ok=True)
+                    with open(beside, "rb") as src, \
+                            open(os.path.join(MUSIC_DIR, os.path.basename(data.music)),
+                                 "wb") as out:
+                        out.write(src.read())
             os.makedirs(OTHER_DIR, exist_ok=True)
             base = slugify(data.name)
             dest = os.path.join(OTHER_DIR, base + ".json")
